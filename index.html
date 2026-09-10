@@ -28,19 +28,28 @@
         left: 0;
         width: 100%;
       }
-      #s-track { cursor: pointer; }
     </style>
+    <script type="text/javascript">
+    //analytics
+    var _gaq = _gaq || [];
+    _gaq.push(['_setAccount', 'UA-26274524-4']);
+    _gaq.push(['_trackPageview']);
+    (function() {
+      var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;
+      ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';
+      var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);
+    })();
+    </script>
   </head>
 
   <body>
     <div id="step-1">
       <div id="global"></div>
-      <div id="title">
-      </div>
+      <div id="title"></div>
       <div id="menucontainer">
         <div id="menu">
           <div id="start">Start</div>
-          <div id="s-track">Track: Cityscape</div>
+          <div id="s-track">Track: Cityscape Prime</div>
           <div id="s-controlType">Controls: Keyboard</div>
           <div id="s-quality">Quality: High</div>
           <div id="s-hud">HUD: On</div>
