@@ -1,72 +1,91 @@
-/*
- * CustomTracks.js
- * Generates additional tracks by cloning the Cityscape track behavior.
- * Each track uses the same geometry/textures but can have different names.
- * To make tracks truly different, you'd need new geometry and texture files.
- */
-
+/**
+ * CustomTracks.js - HexGL Multi-Track Extension
+ */
 var bkcore = bkcore || {};
 bkcore.hexgl = bkcore.hexgl || {};
 bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
 
 (function() {
+    var cityscape = bkcore.hexgl.tracks.Cityscape;
+    if (!cityscape) return;
 
-    // Helper: create a full track object that mirrors Cityscape's structure
-    // but allows overriding the display name.
-    function createCityscapeClone(trackName) {
-        // We return a new object that has the same load/buildMaterials/buildScenes
-        // methods as Cityscape. Since there are no alternate geometry/texture files,
-        // every custom track plays the same course — just with a different label.
-        var track = {
-            lib: null,
-            materials: {},
-            name: trackName,
+    var trackConfigs = {
+        "Cityscape_Prime": {
+            name: "Cityscape Prime",
+            laps: 3,
+            fogColor: 0x88bbff,
+            ambientColor: 0xffffff,
+            spawn: { x: -2268, y: 387, z: -886 },
+            rotY: 0
+        },
+        "Cyber_Neon": {
+            name: "Cyber Neon Night",
+            laps: 3,
+            fogColor: 0x110022,
+            ambientColor: 0xff00aa,
+            spawn: { x: 1200, y: 387, z: 800 },
+            rotY: 1.57
+        },
+        "Martian_Canyon": {
+            name: "Martian Canyon",
+            laps: 4,
+            fogColor: 0x330d00,
+            ambientColor: 0xff4400,
+            spawn: { x: -1800, y: 387, z: 1200 },
+            rotY: 3.14
+        },
+        "Toxic_Sector": {
+            name: "Toxic Sector",
+            laps: 4,
+            fogColor: 0x00220a,
+            ambientColor: 0x39ff14,
+            spawn: { x: 500, y: 387, z: -1500 },
+            rotY: -1.57
+        },
+        "Abyssal_Void": {
+            name: "Abyssal Void",
+            laps: 5,
+            fogColor: 0x02020a,
+            ambientColor: 0x2288ff,
+            spawn: { x: -2268, y: 387, z: -886 },
+            rotY: 0
+        }
+    };
 
-            checkpoints: {
-                list: [0, 1, 2],
-                start: 0,
-                last: 2
-            },
+    Object.keys(trackConfigs).forEach(function(key) {
+        var cfg = trackConfigs[key];
 
-            spawn: {
-                x: -1134 * 2,
-                y: 387,
-                z: -443 * 2
-            },
+        bkcore.hexgl.tracks[key] = {
+            lib: null,
+            materials: {},
+            name: cfg.name,
+            laps: cfg.laps,
+            checkpoints: cityscape.checkpoints,
+            spawn: cfg.spawn,
+            spawnRotation: { x: 0, y: cfg.rotY, z: 0 },
+            analyser: null,
+            pixelRatio: cityscape.pixelRatio,
 
-            spawnRotation: {
-                x: 0,
-                y: 0,
-                z: 0
-            },
+            load: cityscape.load,
+            buildMaterials: cityscape.buildMaterials,
 
-            analyser: null,
-            pixelRatio: 2048.0 / 6000.0
-        };
+            buildScenes: function(display) {
+                cityscape.buildScenes.call(this, display);
 
-        // Delegate to the same implementation as Cityscape
-        track.load           = bkcore.hexgl.tracks.Cityscape.load;
-        track.buildMaterials = bkcore.hexgl.tracks.Cityscape.buildMaterials;
-        track.buildScenes    = bkcore.hexgl.tracks.Cityscape.buildScenes;
-
-        return track;
-    }
-
-    // Register extra tracks — all clones of Cityscape for now.
-    // When you create real new geometry/textures for a track, replace its
-    // entry with a dedicated file like Cityscape.js.
-    var extraTracks = [
-        "Cyber Grid Alpha",
-        "Neon Skyline",
-        "Martian Canyon",
-        "Orbital Ring 9",
-        "Hyperion Loop"
-    ];
-
-    extraTracks.forEach(function(name) {
-        // Build a key that's valid as a JS identifier (no spaces)
-        var key = name.replace(/\s+/g, '_');
-        bkcore.hexgl.tracks[key] = createCityscapeClone(name);
-    });
-
+                if (display && display.scene) {
+                    if (display.scene.fog) {
+                        display.scene.fog.color.setHex(cfg.fogColor);
+                    }
+                    if (display.renderer && display.renderer.setClearColorHex) {
+                        display.renderer.setClearColorHex(cfg.fogColor, 1.0);
+                    }
+                    display.scene.children.forEach(function(child) {
+                        if (child.color && (child instanceof THREE.AmbientLight || child instanceof THREE.DirectionalLight)) {
+                            child.color.setHex(cfg.ambientColor);
+                        }
+                    });
+                }
+            }
+        };
+    });
 })();
