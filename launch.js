@@ -47,6 +47,21 @@ function drawTrackPreview(canvas, track) {
     ctx.fillStyle = hexColor(track.swatch);
     ctx.fillRect(0, 0, w, h);
 
+    // Track #1 is the real, original hand-built Cityscape circuit, not one
+    // of the generated ones -- generateLayout(track.num) would just draw a
+    // made-up loop shape that has nothing to do with its actual layout, so
+    // label it instead of drawing a fake preview.
+    if (track.id === 'Cityscape_Prime') {
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.font = 'bold ' + Math.round(h * 0.22) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('ORIGINAL', w / 2, h / 2);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+        return;
+    }
+
     var internals = window.bkcore && bkcore.hexgl && bkcore.hexgl.tracks && bkcore.hexgl.tracks._proceduralInternals;
     if (!internals) return;
     var layout = internals.generateLayout(track.num);
