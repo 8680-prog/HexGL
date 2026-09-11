@@ -358,13 +358,19 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             );
         }
 
-        // Sample roughly ~90 slots around the loop regardless of how many
+        // Sample roughly ~55 slots around the loop regardless of how many
         // spline points it has, then randomly skip some for natural gaps.
-        var slotStep = Math.max(1, Math.floor(n / 90));
+        // (Was ~90 slots skipping 40% -- around 110 buildings per track.
+        // That's real geometry and overdraw cost on every frame with
+        // frustum culling off, and was a genuine contributor to reported
+        // lag on less powerful hardware. This settles on roughly half as
+        // many buildings: still a real skyline, noticeably lighter to
+        // render.)
+        var slotStep = Math.max(1, Math.floor(n / 55));
         for (var i = 0; i < n; i += slotStep) {
             var p = path[i];
             for (var side = -1; side <= 1; side += 2) {
-                if (rng() < 0.4) continue; // leave gaps, not a solid wall of buildings
+                if (rng() < 0.5) continue; // leave gaps, not a solid wall of buildings
                 var setback = layout.halfWidth + 24 + rng() * 100;
                 var bx = p.x + p.normal.x * setback * side;
                 var bz = p.z + p.normal.z * setback * side;
@@ -417,7 +423,7 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
 
         var rng = makeRng((seed * 40503 + 17) >>> 0);
         var outerRadius = layout.maxRadiusEstimate * 1.5;
-        var count = 20;
+        var count = 14;
 
         for (var i = 0; i < count; i++) {
             // Evenly spaced around the loop with a little jitter, NOT fully
@@ -447,44 +453,17 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
         return group;
     }
 
-    // A second, much less fragile piece of the same "flying above clouds"
-    // read: one big flat plane, textured with the same cloud puff image
-    // tiled across it (not stretched -- cloud.png is a clean 256x256 power-
-    // of-two texture, so RepeatWrapping tiles it cleanly), sitting below
-    // even the lowest dropped building. A single mesh with one opacity
-    // value can't stack into a whiteout the way many overlapping sprites
-    // did, so this is the safe way to guarantee a visible cloud layer shows
-    // up in the gaps between buildings and past the horizon, regardless of
-    // which way a given track's start line happens to face.
-    function buildCloudFloor(layout, cloudTexture) {
-        if (!cloudTexture) return null;
-        cloudTexture.wrapS = cloudTexture.wrapT = THREE.RepeatWrapping;
-        cloudTexture.needsUpdate = true;
-
-        var size = layout.maxRadiusEstimate * 3.6;
-        var repeats = 7;
-        var geo = new THREE.PlaneGeometry(size, size, 1, 1);
-        geo.faceVertexUvs[0].forEach(function(uvSet) {
-            uvSet.forEach(function(uv) { uv.u *= repeats; uv.v *= repeats; });
-        });
-        geo.computeFaceNormals();
-        geo.computeBoundingSphere();
-
-        var material = new THREE.MeshBasicMaterial({
-            map: cloudTexture,
-            color: 0xffffff,
-            transparent: true,
-            opacity: 0.5,
-            depthWrite: false
-        });
-        var mesh = new THREE.Mesh(geo, material);
-        mesh.doubleSided = true;
-        mesh.frustumCulled = false;
-        // Sits below the deepest building base (buildings bottom out around
-        // -300 to -420 relative to the road, see buildBuildingsMeshes).
-        mesh.position.y = -480;
-        return mesh;
-    }
+    // A prior version of this also added one giant flat cloud-textured
+    // plane spanning the whole track's footprint for a guaranteed-visible
+    // cloud floor. Removed: a huge always-rendered (frustumCulled=false)
+    // transparent plane is exactly the kind of thing that's cheap on a
+    // desktop GPU and genuinely heavy on the integrated/mobile GPUs many
+    // people actually run this in a browser on (alpha-blended overdraw
+    // across a large chunk of the screen, every frame) -- it was a real
+    // contributor to reported lag. The sprite ring above stays: it's a
+    // couple dozen small quads instead of one screen-filling one, so it
+    // costs far less fill rate for a similar "there are clouds out there"
+    // read.
 
     // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
     // The road and walls are textured with HexGL's own original diffuse
@@ -505,11 +484,18 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
         var geo = new THREE.Geometry();
         var wallGeo = new THREE.Geometry();
         var stripeGeo = new THREE.Geometry();
-        // Low guardrail-height, not a tall canyon wall -- the original
-        // Cityscape track is an open elevated road with the city and sky
-        // visible around it, not a walled-in tunnel. A short edge barrier
-        // keeps the collision boundary readable without enclosing the view.
-        var wallHeight = 5;
+        // The ship cruises at roughly +12 above the road (see spawn.y in
+        // buildScenes: startPt.height + 12), so a wall shorter than that
+        // sits entirely below flight height -- exactly what a 5-unit wall
+        // did. Near the track edge the ship would visually pass right over
+        // the top of the guardrail into open air/the dropped-down city far
+        // below, reading as the ship "sinking into the side of the track"
+        // even though the actual collision boundary was still holding.
+        // 20 comfortably clears cruise height (with room for the roll/tilt
+        // animation) while staying well short of the original's full
+        // 22-unit wall, so the track still reads as an open elevated road
+        // rather than a walled-in tunnel.
+        var wallHeight = 20;
 
         for (var i = 0; i < n; i++) {
             var p = path[i];
@@ -846,8 +832,6 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 // skyline. ---
                 var cloudTexture = this.lib.get("textures", "cloud");
                 scene.add(buildCloudLayer(layout, cloudTexture, theme.seed));
-                var cloudFloor = buildCloudFloor(layout, cloudTexture);
-                if (cloudFloor) scene.add(cloudFloor);
 
                 // --- BOOST PADS & HEAL PAD: visible markers using the game's
                 // own original bonus-pad art (materials.bonusBase / bonusSpeed),
