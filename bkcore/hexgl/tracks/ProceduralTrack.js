@@ -161,7 +161,12 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             p.normal.x = ntx; p.normal.z = ntz;
         }
 
-        var boostPadCount = 1 + Math.floor(rng() * 3); // 1..3, always at least one
+        // The original Cityscape track only had a single speed-boost zone on
+        // the whole lap -- boosts were a rare, deliberate risk/reward pickup,
+        // not something you'd pass every few seconds. 1-3 per lap made every
+        // procedural track much more forgiving than that. Match the
+        // original's scarcity: exactly one boost pad per track.
+        var boostPadCount = 1;
         var boostPads = [];
         for (i = 0; i < boostPadCount; i++) {
             // keep boost pads away from the start/finish line
@@ -368,7 +373,15 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 var height = 55 + rng() * 230;
                 var angle = Math.atan2(p.tangent.x, p.tangent.z);
                 var geo = rng() < 0.5 ? geoA : geoB;
-                addBuilding(geo, bx, bz, p.height, halfW, halfD, height, angle);
+                // This is a flyover circuit, not a street-level one -- the
+                // road sits high above the city, not among its rooftops.
+                // Drop every building's base well below the road surface
+                // (with some per-building variety) so the skyline reads as
+                // a city seen from above, the way the original track does,
+                // instead of buildings sprouting from the same ground plane
+                // the ship drives on.
+                var cityDrop = 300 + rng() * 120;
+                addBuilding(geo, bx, bz, p.height - cityDrop, halfW, halfD, height, angle);
             }
         }
 
@@ -384,6 +397,93 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             meshes.push(mesh);
         });
         return meshes;
+    }
+
+    // ---- Cloud layer: sells the "flyover high above the city" read ----
+    // Camera-facing sprites (not meshes -- no geometry/tangent risk at all),
+    // using the game's own existing soft particle cloud texture. First cut
+    // of this scattered clouds from near the track center outward at a big
+    // scale, which put many large semi-transparent sprites close enough to
+    // the camera (and stacked enough in the same view direction) that their
+    // blending accumulated into a near-total white screen wash instead of a
+    // background cloud layer -- the opposite of the intended effect. Fixed
+    // by keeping every cloud small, low-opacity, spaced evenly by angle
+    // (never randomly clustered in one direction), and pushed out past the
+    // building field, so they read as a distant bank under the horizon
+    // rather than fog wrapped around the camera.
+    function buildCloudLayer(layout, cloudTexture, seed) {
+        var group = new THREE.Object3D();
+        if (!cloudTexture) return group;
+
+        var rng = makeRng((seed * 40503 + 17) >>> 0);
+        var outerRadius = layout.maxRadiusEstimate * 1.5;
+        var count = 20;
+
+        for (var i = 0; i < count; i++) {
+            // Evenly spaced around the loop with a little jitter, NOT fully
+            // random -- that's what previously let several big sprites land
+            // in the same view direction and stack into an opaque wall.
+            var ang = (i / count) * Math.PI * 2 + (rng() - 0.5) * (Math.PI * 2 / count) * 0.6;
+            var rr = outerRadius * (0.85 + rng() * 0.3); // stay past the building field
+            var x = Math.cos(ang) * rr;
+            var z = Math.sin(ang) * rr;
+            // Just below the road, well above the dropped-down buildings --
+            // a visible layer you're flying over, not a fog bank around you.
+            var y = -90 - rng() * 70;
+
+            var sprite = new THREE.Sprite({
+                map: cloudTexture,
+                color: 0xffffff,
+                blending: THREE.NormalBlending,
+                useScreenCoordinates: false
+            });
+            sprite.opacity = 0.22 + rng() * 0.16;
+            var scale = 110 + rng() * 90;
+            sprite.scale.set(scale, scale * (0.45 + rng() * 0.2), 1);
+            sprite.position.set(x, y, z);
+            group.add(sprite);
+        }
+
+        return group;
+    }
+
+    // A second, much less fragile piece of the same "flying above clouds"
+    // read: one big flat plane, textured with the same cloud puff image
+    // tiled across it (not stretched -- cloud.png is a clean 256x256 power-
+    // of-two texture, so RepeatWrapping tiles it cleanly), sitting below
+    // even the lowest dropped building. A single mesh with one opacity
+    // value can't stack into a whiteout the way many overlapping sprites
+    // did, so this is the safe way to guarantee a visible cloud layer shows
+    // up in the gaps between buildings and past the horizon, regardless of
+    // which way a given track's start line happens to face.
+    function buildCloudFloor(layout, cloudTexture) {
+        if (!cloudTexture) return null;
+        cloudTexture.wrapS = cloudTexture.wrapT = THREE.RepeatWrapping;
+        cloudTexture.needsUpdate = true;
+
+        var size = layout.maxRadiusEstimate * 3.6;
+        var repeats = 7;
+        var geo = new THREE.PlaneGeometry(size, size, 1, 1);
+        geo.faceVertexUvs[0].forEach(function(uvSet) {
+            uvSet.forEach(function(uv) { uv.u *= repeats; uv.v *= repeats; });
+        });
+        geo.computeFaceNormals();
+        geo.computeBoundingSphere();
+
+        var material = new THREE.MeshBasicMaterial({
+            map: cloudTexture,
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.5,
+            depthWrite: false
+        });
+        var mesh = new THREE.Mesh(geo, material);
+        mesh.doubleSided = true;
+        mesh.frustumCulled = false;
+        // Sits below the deepest building base (buildings bottom out around
+        // -300 to -420 relative to the road, see buildBuildingsMeshes).
+        mesh.position.y = -480;
+        return mesh;
     }
 
     // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
@@ -740,6 +840,15 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                     scene.add(mesh);
                 });
 
+                // --- CLOUD LAYER: sits between the road and the dropped-down
+                // city below, so the track reads as a flyover high above the
+                // clouds rather than a road sitting on the ground next to the
+                // skyline. ---
+                var cloudTexture = this.lib.get("textures", "cloud");
+                scene.add(buildCloudLayer(layout, cloudTexture, theme.seed));
+                var cloudFloor = buildCloudFloor(layout, cloudTexture);
+                if (cloudFloor) scene.add(cloudFloor);
+
                 // --- BOOST PADS & HEAL PAD: visible markers using the game's
                 // own original bonus-pad art (materials.bonusBase / bonusSpeed),
                 // placed at the layout's generated pad locations. ---
@@ -839,21 +948,13 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                     minimapCtx.closePath();
                     minimapCtx.stroke();
 
-                    // boost pads (blue) + heal pad (green, hidden once used)
-                    minimapCtx.fillStyle = '#33aaff';
-                    layout.boostPads.forEach(function(idx) {
-                        var pp = mmPathPx[idx];
-                        minimapCtx.beginPath();
-                        minimapCtx.arc(pp.x, pp.y, 3.5, 0, Math.PI * 2);
-                        minimapCtx.fill();
-                    });
-                    if (healIdx != null && !healUsed) {
-                        var hp = mmPathPx[healIdx];
-                        minimapCtx.fillStyle = '#33ff88';
-                        minimapCtx.beginPath();
-                        minimapCtx.arc(hp.x, hp.y, 4, 0, Math.PI * 2);
-                        minimapCtx.fill();
-                    }
+                    // Boost/heal pad locations are intentionally NOT marked
+                    // here -- the original track never telegraphed its power-up
+                    // spot on a map either, you found it (or didn't) by
+                    // learning the circuit. The pads are still clearly
+                    // visible in-world when you're actually on top of them
+                    // (see makePad() below); the minimap just shows the loop
+                    // shape and where you are on it, like the original.
 
                     // ship marker
                     var sp = mmProject(shipX, shipZ);
