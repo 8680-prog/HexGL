@@ -1,0 +1,623 @@
+/**
+ * ProceduralTrack.js - Generates genuinely distinct closed-loop circuits.
+ *
+ * HexGL's ship physics (collision, height/elevation, checkpoints) are all
+ * driven by sampling 2D bitmaps (see ShipControls.js / Gameplay.js /
+ * bkcore.ImageData) rather than by raycasting against 3D geometry. That
+ * means a real, physically distinct track can be built entirely in code:
+ *
+ *   1. Pick a seed -> deterministically generate a closed-loop centerline
+ *      (a jittered, rounded polygon smoothed with a Catmull-Rom spline).
+ *   2. Rasterize that path onto an offscreen canvas as the collision map
+ *      (white = drivable, everything else = wall) and a second canvas as
+ *      the height map (encodes elevation, flat or hilly per track), plus
+ *      checkpoint bands and boost pads baked into the collision map's
+ *      color channels exactly the way Cityscape's hand-authored map does.
+ *   3. Build a matching 3D ribbon mesh along the same path/heights so what
+ *      you see lines up with what you drive on.
+ *
+ * Every track built this way has its own layout (loop shape, width,
+ * elevation, checkpoint count) -- not a re-skin of a shared circuit.
+ *
+ * Ship model, skybox, HUD textures, audio and controls are all reused
+ * from Cityscape.js (cityscape.load / cityscape.buildMaterials) since
+ * none of that depends on track layout.
+ */
+var bkcore = bkcore || {};
+bkcore.hexgl = bkcore.hexgl || {};
+bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
+
+(function() {
+
+    // ---- Seeded RNG (mulberry32) so every track is reproducible from its seed ----
+    function makeRng(seed) {
+        var a = seed >>> 0;
+        return function() {
+            a |= 0; a = (a + 0x6D2B79F5) | 0;
+            var t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    // ---- Closed Catmull-Rom spline sampler ----
+    function catmullRomPoint(p0, p1, p2, p3, t) {
+        var t2 = t * t, t3 = t2 * t;
+        return {
+            x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+            z: 0.5 * ((2 * p1.z) + (-p0.z + p2.z) * t + (2 * p0.z - 5 * p1.z + 4 * p2.z - p3.z) * t2 + (-p0.z + 3 * p1.z - 3 * p2.z + p3.z) * t3)
+        };
+    }
+
+    function sampleClosedSpline(controlPoints, samplesPerSegment) {
+        var n = controlPoints.length;
+        var out = [];
+        for (var i = 0; i < n; i++) {
+            var p0 = controlPoints[(i - 1 + n) % n];
+            var p1 = controlPoints[i];
+            var p2 = controlPoints[(i + 1) % n];
+            var p3 = controlPoints[(i + 2) % n];
+            for (var s = 0; s < samplesPerSegment; s++) {
+                out.push(catmullRomPoint(p0, p1, p2, p3, s / samplesPerSegment));
+            }
+        }
+        return out;
+    }
+
+    // ---- Layout generation: control points -> smooth path + per-point height/tangent/normal ----
+    function generateLayout(seed) {
+        var rng = makeRng(seed);
+
+        var numPoints = 8 + Math.floor(rng() * 7); // 8..14
+        var baseRadius = 900 + rng() * 900; // 900..1800
+        var halfWidth = 46 + rng() * 44; // 46..90
+
+        var controlPoints = [];
+        for (var i = 0; i < numPoints; i++) {
+            var slot = (i / numPoints) * Math.PI * 2;
+            var jitter = (rng() - 0.5) * (Math.PI * 2 / numPoints) * 0.6;
+            var angle = slot + jitter;
+            var radius = baseRadius * (0.68 + rng() * 0.64);
+            controlPoints.push({ x: Math.cos(angle) * radius, z: Math.sin(angle) * radius });
+        }
+
+        var samplesPerSegment = 24;
+        var path = sampleClosedSpline(controlPoints, samplesPerSegment);
+        var total = path.length;
+
+        var hilly = rng() < 0.4;
+        var hillAmplitude = hilly ? (18 + rng() * 55) : 0;
+        var hillFreq = 1 + Math.floor(rng() * 3);
+        var hillPhase = rng() * Math.PI * 2;
+
+        for (i = 0; i < total; i++) {
+            var t = i / total;
+            path[i].height = hilly
+                ? hillAmplitude * (0.5 + 0.5 * Math.sin(hillFreq * t * Math.PI * 2 + hillPhase))
+                : 0;
+        }
+
+        // tangent/normal per sample (finite differences), used for ribbon edges
+        for (i = 0; i < total; i++) {
+            var prev = path[(i - 1 + total) % total];
+            var next = path[(i + 1) % total];
+            var tx = next.x - prev.x, tz = next.z - prev.z;
+            var tl = Math.sqrt(tx * tx + tz * tz) || 1;
+            tx /= tl; tz /= tl;
+            path[i].tangent = { x: tx, z: tz };
+            path[i].normal = { x: -tz, z: tx }; // perpendicular, world XZ plane
+        }
+
+        var checkpointCount = 3 + Math.floor(rng() * 3); // 3..5 (includes start/finish)
+        var checkpoints = [];
+        for (i = 0; i < checkpointCount; i++) {
+            checkpoints.push(Math.floor((i / checkpointCount) * total));
+        }
+
+        // IMPORTANT: ShipControls.reset() does not build a proper yaw quaternion
+        // from an arbitrary spawnRotation -- it only works correctly for the
+        // identity case {x:0,y:0,z:0} (which is why Cityscape always uses that).
+        // Rather than fight that, rotate the WHOLE path so the tangent at the
+        // start checkpoint points along world +Z, matching the ship's fixed
+        // default forward direction under an identity rotation. That lets every
+        // procedural track keep spawnRotation at identity and still start the
+        // ship facing correctly along the track.
+        // Vectors here use a bearing-style angle (angle measured from +Z
+        // toward +X, i.e. atan2(x, z), so bearing 0 = (0,1)). Rotating a
+        // vector at bearing phi by +alignAngle in that convention is:
+        //   newX = x*cos(alignAngle) - z*sin(alignAngle)
+        //   newZ = x*sin(alignAngle) + z*cos(alignAngle)
+        // which maps a vector originally AT bearing alignAngle to bearing 0.
+        // (Verified: this is NOT the same sign pattern as the standard
+        // atan2(y,x) rotation matrix -- mixing the two conventions up is
+        // what caused the ship to spawn facing an essentially random
+        // direction the first time this was written.)
+        var startTangent = path[checkpoints[0]].tangent;
+        var alignAngle = Math.atan2(startTangent.x, startTangent.z);
+        var cosA = Math.cos(alignAngle), sinA = Math.sin(alignAngle);
+        for (i = 0; i < total; i++) {
+            var p = path[i];
+            var rx = p.x * cosA - p.z * sinA;
+            var rz = p.x * sinA + p.z * cosA;
+            p.x = rx; p.z = rz;
+            var ttx = p.tangent.x * cosA - p.tangent.z * sinA;
+            var ttz = p.tangent.x * sinA + p.tangent.z * cosA;
+            p.tangent.x = ttx; p.tangent.z = ttz;
+            var ntx = p.normal.x * cosA - p.normal.z * sinA;
+            var ntz = p.normal.x * sinA + p.normal.z * cosA;
+            p.normal.x = ntx; p.normal.z = ntz;
+        }
+
+        var boostPadCount = Math.floor(rng() * 3); // 0..2
+        var boostPads = [];
+        for (i = 0; i < boostPadCount; i++) {
+            // keep boost pads away from the start/finish line
+            var idx = Math.floor(((i + 1) / (boostPadCount + 1)) * total + total * 0.15) % total;
+            boostPads.push(idx);
+        }
+
+        return {
+            path: path,
+            halfWidth: halfWidth,
+            checkpoints: checkpoints,
+            boostPads: boostPads,
+            hilly: hilly,
+            maxRadiusEstimate: baseRadius * 1.32 + halfWidth
+        };
+    }
+
+    // ---- Rasterize collision + height maps to canvases, return data URLs ----
+    function rasterizeMaps(layout, canvasSize, worldSpan) {
+        var pixelRatio = canvasSize / worldSpan;
+        var path = layout.path;
+        var n = path.length;
+
+        function toPx(p) {
+            return {
+                x: canvasSize / 2 + p.x * pixelRatio,
+                y: canvasSize / 2 + p.z * pixelRatio
+            };
+        }
+
+        // --- Collision map: black = wall, white = track, (255,255,idx) = checkpoint, (255,<127,<127) = boost ---
+        var cCanvas = document.createElement('canvas');
+        cCanvas.width = cCanvas.height = canvasSize;
+        var cctx = cCanvas.getContext('2d');
+        cctx.fillStyle = '#000000';
+        cctx.fillRect(0, 0, canvasSize, canvasSize);
+
+        cctx.strokeStyle = '#ffffff';
+        cctx.lineWidth = layout.halfWidth * 2 * pixelRatio;
+        cctx.lineJoin = 'round';
+        cctx.lineCap = 'round';
+        cctx.beginPath();
+        for (var i = 0; i <= n; i++) {
+            var p = toPx(path[i % n]);
+            if (i === 0) cctx.moveTo(p.x, p.y); else cctx.lineTo(p.x, p.y);
+        }
+        cctx.closePath();
+        cctx.stroke();
+
+        // Checkpoint bands (drawn after, thin, crossing the track)
+        cctx.lineWidth = Math.max(3, layout.halfWidth * 0.35 * pixelRatio);
+        layout.checkpoints.forEach(function(idx, cpNumber) {
+            var p = path[idx];
+            var a = { x: p.x + p.normal.x * layout.halfWidth * 1.3, z: p.z + p.normal.z * layout.halfWidth * 1.3 };
+            var b = { x: p.x - p.normal.x * layout.halfWidth * 1.3, z: p.z - p.normal.z * layout.halfWidth * 1.3 };
+            var pa = toPx(a), pb = toPx(b);
+            cctx.strokeStyle = 'rgb(255,255,' + cpNumber + ')';
+            cctx.beginPath();
+            cctx.moveTo(pa.x, pa.y);
+            cctx.lineTo(pb.x, pb.y);
+            cctx.stroke();
+        });
+
+        // Boost pads
+        cctx.lineWidth = Math.max(3, layout.halfWidth * 0.6 * pixelRatio);
+        cctx.strokeStyle = 'rgb(255,60,60)';
+        layout.boostPads.forEach(function(idx) {
+            var p = path[idx];
+            var next = path[(idx + 6) % n];
+            var pa = toPx(p), pb = toPx(next);
+            cctx.beginPath();
+            cctx.moveTo(pa.x, pa.y);
+            cctx.lineTo(pb.x, pb.y);
+            cctx.stroke();
+        });
+
+        // --- Height map: white background = "no data" sentinel (>16777), track stroked with r=height (0..255) ---
+        var hCanvas = document.createElement('canvas');
+        hCanvas.width = hCanvas.height = canvasSize;
+        var hctx = hCanvas.getContext('2d');
+        hctx.fillStyle = '#ffffff';
+        hctx.fillRect(0, 0, canvasSize, canvasSize);
+
+        hctx.lineJoin = 'round';
+        hctx.lineCap = 'round';
+        hctx.lineWidth = layout.halfWidth * 2.4 * pixelRatio;
+
+        if (!layout.hilly) {
+            hctx.strokeStyle = 'rgb(0,0,0)'; // height 0 everywhere
+            hctx.beginPath();
+            for (i = 0; i <= n; i++) {
+                var hp = toPx(path[i % n]);
+                if (i === 0) hctx.moveTo(hp.x, hp.y); else hctx.lineTo(hp.x, hp.y);
+            }
+            hctx.closePath();
+            hctx.stroke();
+        } else {
+            // vary stroke color per-segment to encode elevation along the path
+            for (i = 0; i < n; i++) {
+                var p1 = toPx(path[i]);
+                var p2 = toPx(path[(i + 1) % n]);
+                var h = Math.max(0, Math.min(255, Math.round(path[i].height)));
+                hctx.strokeStyle = 'rgb(' + h + ',0,0)';
+                hctx.beginPath();
+                hctx.moveTo(p1.x, p1.y);
+                hctx.lineTo(p2.x, p2.y);
+                hctx.stroke();
+            }
+        }
+
+        return {
+            collisionDataURL: cCanvas.toDataURL('image/png'),
+            heightDataURL: hCanvas.toDataURL('image/png'),
+            pixelRatio: pixelRatio
+        };
+    }
+
+    // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
+    // Also builds bright edge-stripe geometry: a flat, single-color track
+    // surface reads as "empty space" whenever its color happens to be close
+    // to the sky/fog color (confirmed by testing -- the track was rendering
+    // correctly the whole time, it just wasn't visually distinguishable from
+    // the sky in several color themes). Two high-contrast stripes along the
+    // track edges fix that regardless of the theme's color choices, and also
+    // give the driver perspective/depth cues down the track.
+    function buildRibbonMesh(layout, trackMaterials, wallMaterial, stripeMaterial) {
+        var path = layout.path;
+        var n = path.length;
+        var hw = layout.halfWidth;
+        var stripeWidth = Math.min(7, hw * 0.16);
+        var stripeLift = 0.4; // avoid z-fighting with the main surface
+
+        var geo = new THREE.Geometry();
+        var wallGeo = new THREE.Geometry();
+        var stripeGeo = new THREE.Geometry();
+        var wallHeight = 22;
+
+        for (var i = 0; i < n; i++) {
+            var p = path[i];
+            var lx = p.x + p.normal.x * hw, lz = p.z + p.normal.z * hw;
+            var rx = p.x - p.normal.x * hw, rz = p.z - p.normal.z * hw;
+            var lix = p.x + p.normal.x * (hw - stripeWidth), liz = p.z + p.normal.z * (hw - stripeWidth);
+            var rix = p.x - p.normal.x * (hw - stripeWidth), riz = p.z - p.normal.z * (hw - stripeWidth);
+
+            geo.vertices.push(new THREE.Vector3(lx, p.height, lz));   // 2*i
+            geo.vertices.push(new THREE.Vector3(rx, p.height, rz));   // 2*i+1
+
+            wallGeo.vertices.push(new THREE.Vector3(lx, p.height, lz));            // 4*i
+            wallGeo.vertices.push(new THREE.Vector3(lx, p.height + wallHeight, lz)); // 4*i+1
+            wallGeo.vertices.push(new THREE.Vector3(rx, p.height, rz));            // 4*i+2
+            wallGeo.vertices.push(new THREE.Vector3(rx, p.height + wallHeight, rz)); // 4*i+3
+
+            // 4 verts/sample: leftOuter, leftInner, rightInner, rightOuter (all lifted slightly)
+            stripeGeo.vertices.push(new THREE.Vector3(lx, p.height + stripeLift, lz));   // 4*i
+            stripeGeo.vertices.push(new THREE.Vector3(lix, p.height + stripeLift, liz)); // 4*i+1
+            stripeGeo.vertices.push(new THREE.Vector3(rix, p.height + stripeLift, riz)); // 4*i+2
+            stripeGeo.vertices.push(new THREE.Vector3(rx, p.height + stripeLift, rz));   // 4*i+3
+        }
+
+        for (i = 0; i < n; i++) {
+            var a = 2 * i, b = 2 * i + 1;
+            var c = 2 * ((i + 1) % n), d = 2 * ((i + 1) % n) + 1;
+
+            // Alternate a light/dark material band every few segments, purely
+            // for depth perception: a single flat, unlit, textureless color
+            // filling most of the screen up close (before the track narrows
+            // toward the horizon) gives the driver no sense of speed or
+            // distance. materialIndex picks between the two shades set up by
+            // the caller (geo.materials[0]/[1]).
+            var band = Math.floor(i / 4) % 2;
+            var f1 = new THREE.Face3(a, b, d);
+            var f2 = new THREE.Face3(a, d, c);
+            f1.materialIndex = band;
+            f2.materialIndex = band;
+            geo.faces.push(f1, f2);
+            geo.faceVertexUvs[0].push(
+                [new THREE.UV(0, i / n), new THREE.UV(1, i / n), new THREE.UV(1, (i + 1) / n)],
+                [new THREE.UV(0, i / n), new THREE.UV(1, (i + 1) / n), new THREE.UV(0, (i + 1) / n)]
+            );
+
+            var la = 4 * i, lb = 4 * i + 1, ra = 4 * i + 2, rb = 4 * i + 3;
+            var lc = 4 * ((i + 1) % n), ld = 4 * ((i + 1) % n) + 1;
+            var rc = 4 * ((i + 1) % n) + 2, rd = 4 * ((i + 1) % n) + 3;
+
+            // left wall (facing inward)
+            wallGeo.faces.push(new THREE.Face3(la, lb, ld), new THREE.Face3(la, ld, lc));
+            // right wall (facing inward)
+            wallGeo.faces.push(new THREE.Face3(ra, rc, rd), new THREE.Face3(ra, rd, rb));
+            wallGeo.faceVertexUvs[0].push(
+                [new THREE.UV(0, 0), new THREE.UV(0, 1), new THREE.UV(1, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(1, 0)],
+                [new THREE.UV(0, 0), new THREE.UV(0, 1), new THREE.UV(1, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(1, 0)]
+            );
+
+            // Edge stripes: leftOuter(0)-leftInner(1) strip, rightInner(2)-rightOuter(3) strip
+            var sa = 4 * i, sb = 4 * i + 1, sc = 4 * i + 2, sd = 4 * i + 3;
+            var sna = 4 * ((i + 1) % n), snb = 4 * ((i + 1) % n) + 1;
+            var snc = 4 * ((i + 1) % n) + 2, snd = 4 * ((i + 1) % n) + 3;
+            stripeGeo.faces.push(
+                new THREE.Face3(sa, sb, snb), new THREE.Face3(sa, snb, sna),   // left stripe
+                new THREE.Face3(sc, sd, snd), new THREE.Face3(sc, snd, snc)    // right stripe
+            );
+            stripeGeo.faceVertexUvs[0].push(
+                [new THREE.UV(0, 0), new THREE.UV(1, 0), new THREE.UV(1, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(0, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 0), new THREE.UV(1, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(0, 1)]
+            );
+        }
+
+        geo.computeFaceNormals();
+        wallGeo.computeFaceNormals();
+        stripeGeo.computeFaceNormals();
+
+        // THREE.Mesh defaults to frustumCulled=true, and this three.js
+        // build's frustum test dereferences geometry.boundingSphere
+        // unconditionally -- which is null until this is called. Belt and
+        // suspenders: compute it AND disable frustumCulled, since these
+        // meshes are small enough that culling buys nothing anyway.
+        geo.computeBoundingSphere();
+        wallGeo.computeBoundingSphere();
+        stripeGeo.computeBoundingSphere();
+
+        geo.materials = trackMaterials;
+        var trackFaceMaterial = new THREE.MeshFaceMaterial();
+        var trackMesh = new THREE.Mesh(geo, trackFaceMaterial);
+        trackMesh.doubleSided = true;
+        trackMesh.frustumCulled = false;
+        var wallMesh = new THREE.Mesh(wallGeo, wallMaterial);
+        wallMesh.doubleSided = true;
+        wallMesh.frustumCulled = false;
+        var stripeMesh = new THREE.Mesh(stripeGeo, stripeMaterial);
+        stripeMesh.doubleSided = true;
+        stripeMesh.frustumCulled = false;
+
+        return { trackMesh: trackMesh, wallMesh: wallMesh, stripeMesh: stripeMesh };
+    }
+
+    // ---- Public factory: build a full track object for bkcore.hexgl.tracks[id] ----
+    bkcore.hexgl.tracks.buildProcedural = function(theme, cityscape) {
+        var CANVAS_SIZE = 2048;
+        var WORLD_SPAN = 6000;
+
+        return {
+            lib: null,
+            materials: {},
+            name: theme.name,
+            laps: theme.laps,
+            analyser: null,
+            pixelRatio: WORLD_SPAN > 0 ? CANVAS_SIZE / WORLD_SPAN : 1,
+
+            // Ship model / skybox / HUD / audio are layout-independent: reuse Cityscape's loader.
+            load: cityscape.load,
+            buildMaterials: cityscape.buildMaterials,
+
+            buildScenes: function(display, quality) {
+                var self = this;
+                var layout = generateLayout(theme.seed);
+                var maps = rasterizeMaps(layout, CANVAS_SIZE, WORLD_SPAN);
+
+                // spawn at checkpoint 0, facing the path's tangent direction there
+                var startIdx = layout.checkpoints[0];
+                var startPt = layout.path[startIdx];
+                this.spawn = { x: startPt.x, y: startPt.height + 12, z: startPt.z };
+                // Identity: the path was pre-rotated in generateLayout() so the
+                // start tangent already points along world +Z, which is this
+                // engine's fixed default forward direction under no rotation.
+                this.spawnRotation = { x: 0, y: 0, z: 0 };
+
+                this.checkpoints = {
+                    list: layout.checkpoints.map(function(_, idx) { return idx; }),
+                    start: 0,
+                    last: layout.checkpoints.length - 1
+                };
+
+                // --- SKYBOX (same approach as Cityscape.buildScenes) ---
+                var sceneCube = new THREE.Scene();
+                var cameraCube = new THREE.PerspectiveCamera(70, display.width / display.height, 1, 6000);
+                sceneCube.add(cameraCube);
+
+                var skyshader = THREE.ShaderUtils.lib["cube"];
+                skyshader.uniforms["tCube"].texture = this.lib.get("texturesCube", "skybox.dawnclouds");
+                var skymaterial = new THREE.ShaderMaterial({
+                    fragmentShader: skyshader.fragmentShader,
+                    vertexShader: skyshader.vertexShader,
+                    uniforms: skyshader.uniforms,
+                    depthWrite: false
+                });
+                var skymesh = new THREE.Mesh(new THREE.CubeGeometry(100, 100, 100), skymaterial);
+                skymesh.flipSided = true;
+                sceneCube.add(skymesh);
+                display.manager.add("sky", sceneCube, cameraCube);
+
+                // --- MAIN SCENE ---
+                var ambient = 0xbbbbbb, diffuse = 0xffffff;
+                var camera = new THREE.PerspectiveCamera(70, display.width / display.height, 1, 60000);
+                // CRITICAL: this three.js build's Object3D.updateMatrix() rebuilds
+                // the local matrix from the (Euler) .rotation property every time
+                // updateMatrixWorld() runs -- which happens every frame, since the
+                // camera is added to the scene and WebGLRenderer.render() calls
+                // scene.updateMatrixWorld(), which recurses into the camera. That
+                // clobbers the matrix camera.lookAt() just computed, rebuilding it
+                // from a *decomposed* Euler angle triple instead. The decomposition
+                // is not guaranteed to round-trip back to the same matrix, and it
+                // provably doesn't here: aligning the track's start tangent exactly
+                // to +Z (see generateLayout) puts the chase camera's look direction
+                // exactly in the YZ plane, a degenerate case where the Euler
+                // round-trip produces a genuinely different (wrong) orientation --
+                // that's what was pointing the camera into empty space every frame.
+                // Disabling matrixAutoUpdate stops the rebuild-from-Euler step, so
+                // camera.matrix keeps exactly what lookAt() set; matrixWorldNeedsUpdate
+                // is forced true each frame (see the render loop below) so the world
+                // matrix still refreshes from that correct local matrix.
+                camera.matrixAutoUpdate = false;
+                var scene = new THREE.Scene();
+                scene.add(camera);
+                scene.add(new THREE.AmbientLight(ambient));
+
+                var sun = new THREE.DirectionalLight(diffuse, 1.5, 30000);
+                sun.position.set(-4000, 1200, 1800);
+                sun.lookAt(new THREE.Vector3());
+                scene.add(sun);
+
+                // --- SHIP ---
+                var ship = display.createMesh(scene, this.lib.get("geometries", "ship.feisar"), this.spawn.x, this.spawn.y + 5, this.spawn.z, this.materials.ship);
+
+                var booster = display.createMesh(ship, this.lib.get("geometries", "booster"), 0, 0.665, -3.8, this.materials.booster);
+                booster.depthWrite = false;
+
+                var boosterSprite = new THREE.Sprite({
+                    map: this.lib.get("textures", "booster.sprite"),
+                    blending: THREE.AdditiveBlending,
+                    useScreenCoordinates: false,
+                    color: 0xffffff
+                });
+                boosterSprite.scale.set(0.02, 0.02, 0.02);
+                boosterSprite.mergeWith3D = false;
+                booster.add(boosterSprite);
+
+                var boosterLight = new THREE.PointLight(0x00a2ff, 4.0, 60);
+                boosterLight.position.set(0, 0.665, -4);
+                if (quality > 0) ship.add(boosterLight);
+
+                // --- SHIP CONTROLS: point collision/height at our generated maps ---
+                var shipControls = new bkcore.hexgl.ShipControls(display);
+                shipControls.collisionMap = new bkcore.ImageData(maps.collisionDataURL, function() {
+                    shipControls.collisionMap.loaded = true;
+                });
+                shipControls.collisionPixelRatio = maps.pixelRatio;
+                shipControls.collisionDetection = true;
+                shipControls.heightMap = new bkcore.ImageData(maps.heightDataURL, function() {
+                    shipControls.heightMap.loaded = true;
+                });
+                shipControls.heightPixelRatio = maps.pixelRatio;
+                shipControls.heightBias = 0.0;
+                shipControls.heightScale = 1.0;
+                shipControls.control(ship);
+                display.components.shipControls = shipControls;
+                display.tweakShipControls();
+
+                // Gameplay reads its own checkpoint analyser off the collision map (same image the ship uses).
+                this.analyser = shipControls.collisionMap;
+
+                // --- SHIP EFFECTS ---
+                var fxParams = {
+                    scene: scene,
+                    shipControls: shipControls,
+                    booster: booster,
+                    boosterSprite: boosterSprite,
+                    boosterLight: boosterLight,
+                    useParticles: false
+                };
+                if (quality > 2) {
+                    fxParams.textureCloud = this.lib.get("textures", "cloud");
+                    fxParams.textureSpark = this.lib.get("textures", "spark");
+                    fxParams.useParticles = true;
+                }
+                display.components.shipEffects = new bkcore.hexgl.ShipEffects(fxParams);
+
+                // --- PROCEDURAL TRACK MESH ---
+                // Two alternating floor shades (light/dark bands every 4
+                // segments) so the road reads as a receding surface with a
+                // sense of speed/distance even up close, where a single flat
+                // unlit color would otherwise fill most of the screen
+                // uniformly. Darken by scaling toward black rather than
+                // picking an unrelated color, so it still reads as "the same
+                // road" rather than a second stripe color.
+                var tr = (theme.trackColor >> 16) & 0xff, tg = (theme.trackColor >> 8) & 0xff, tb = theme.trackColor & 0xff;
+                var trackColorDark = (Math.round(tr * 0.62) << 16) | (Math.round(tg * 0.62) << 8) | Math.round(tb * 0.62);
+                var trackMaterial = new THREE.MeshBasicMaterial({ color: theme.trackColor });
+                var trackMaterialDark = new THREE.MeshBasicMaterial({ color: trackColorDark });
+                var wallMaterial = new THREE.MeshBasicMaterial({ color: theme.sceneryColor, wireframe: !!theme.wireframe });
+                // Edge stripes need to read clearly against THIS theme's sky/fog
+                // color specifically (a fixed white or fixed dark color would fail
+                // for some of the 50 themes -- e.g. white stripes vanish against
+                // Arctic Frost's near-white fog). Pick white or near-black by the
+                // fog color's perceived luminance so it always contrasts.
+                var fr = (theme.fogColor >> 16) & 0xff, fg = (theme.fogColor >> 8) & 0xff, fb = theme.fogColor & 0xff;
+                var fogLuminance = 0.299 * fr + 0.587 * fg + 0.114 * fb;
+                var stripeColor = fogLuminance > 150 ? 0x101010 : 0xffffff;
+                var stripeMaterial = new THREE.MeshBasicMaterial({ color: stripeColor });
+                var built = buildRibbonMesh(layout, [trackMaterial, trackMaterialDark], wallMaterial, stripeMaterial);
+                scene.add(built.trackMesh);
+                scene.add(built.wallMesh);
+                scene.add(built.stripeMesh);
+
+                // --- CAMERA ---
+                display.components.cameraChase = new bkcore.hexgl.CameraChase({
+                    target: ship,
+                    camera: camera,
+                    cameraCube: display.manager.get("sky").camera,
+                    lerp: 0.5,
+                    yoffset: 8.0,
+                    zoffset: 10.0,
+                    viewOffset: 10.0
+                });
+
+                display.manager.add("game", scene, camera, function(delta, renderer) {
+                    if (delta > 25 && this.objects.lowFPS < 1000) this.objects.lowFPS++;
+                    var dt = delta / 16.6;
+                    this.objects.components.shipControls.update(dt);
+                    this.objects.components.shipEffects.update(dt);
+                    this.objects.components.cameraChase.update(dt, this.objects.components.shipControls.getSpeedRatio());
+                    // camera.matrixAutoUpdate is disabled (see where `camera` is
+                    // created) so updateMatrixWorld() won't rebuild the matrix from
+                    // Euler .rotation -- but that also means the translation this
+                    // engine's normal updateMatrix() would have written (matrix.
+                    // setPosition(this.position)) never happens either, since
+                    // lookAt()/Matrix4.lookAt() only ever touches the rotation part
+                    // of the matrix. Write the translation back in ourselves, then
+                    // force the world-matrix refresh from that now-complete matrix.
+                    camera.matrix.setPosition(camera.position);
+                    camera.matrixWorldNeedsUpdate = true;
+                    this.objects.composers.game.render(dt);
+                    if (this.objects.hud) this.objects.hud.update(
+                        this.objects.components.shipControls.getRealSpeed(100),
+                        this.objects.components.shipControls.getRealSpeedRatio(),
+                        this.objects.components.shipControls.getShield(100),
+                        this.objects.components.shipControls.getShieldRatio()
+                    );
+                    if (this.objects.components.shipControls.getShieldRatio() < 0.2)
+                        this.objects.extras.vignetteColor.setHex(0x992020);
+                    else
+                        this.objects.extras.vignetteColor.setHex(theme.trackColor);
+                }, {
+                    components: display.components,
+                    composers: display.composers,
+                    extras: display.extras,
+                    quality: quality,
+                    hud: display.hud,
+                    time: 0.0,
+                    lowFPS: 0
+                });
+
+                // Apply fog / clear color for this theme now that the scene exists.
+                if (display.renderer) {
+                    if (typeof display.renderer.setClearColorHex === 'function') display.renderer.setClearColorHex(theme.fogColor, 1.0);
+                    else if (typeof display.renderer.setClearColor === 'function') display.renderer.setClearColor(theme.fogColor, 1.0);
+                }
+                scene.fog = new THREE.Fog(theme.fogColor, theme.fogNear, theme.fogFar);
+            }
+        };
+    };
+
+    // expose internals for testing
+    bkcore.hexgl.tracks._proceduralInternals = {
+        makeRng: makeRng,
+        generateLayout: generateLayout,
+        rasterizeMaps: rasterizeMaps
+    };
+})();
