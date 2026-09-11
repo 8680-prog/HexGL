@@ -294,6 +294,98 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
         };
     }
 
+    // Blends a theme color toward white so it reads as a subtle color GRADE
+    // on top of the original road/building photo textures instead of a hard
+    // multiply that washes the texture out into a flat cartoon color. amount
+    // 0 = no tint (pure original texture), 1 = full theme color (old
+    // behavior). Keeping this low is what keeps the original texture detail
+    // (concrete grain, panel seams, window glass) visible per track while
+    // still giving every track its own color identity.
+    function tintTowardsWhite(colorHex, amount) {
+        var r = (colorHex >> 16) & 0xff, g = (colorHex >> 8) & 0xff, b = colorHex & 0xff;
+        var nr = Math.round(255 * (1 - amount) + r * amount);
+        var ng = Math.round(255 * (1 - amount) + g * amount);
+        var nb = Math.round(255 * (1 - amount) + b * amount);
+        return (nr << 16) | (ng << 8) | nb;
+    }
+
+    // ---- Procedural buildings: cheap, camera-facing-agnostic city skyline ----
+    // The original Cityscape track surrounds its road with hand-modeled
+    // skyscrapers (scrapers1/scrapers2 geometries). Those meshes are baked
+    // to that one specific track layout and can't be reused as-is on a
+    // different path, so here every building is a simple box, textured with
+    // the SAME original scraper photo textures (not a flat color), scattered
+    // along this track's own generated path. Two merged THREE.Geometry
+    // objects (one per texture) keep the whole skyline to two draw calls
+    // no matter how many buildings are placed.
+    function buildBuildingsMeshes(layout, materialA, materialB, seed) {
+        var rng = makeRng((seed * 104729 + 7) >>> 0);
+        var path = layout.path;
+        var n = path.length;
+
+        var geoA = new THREE.Geometry();
+        var geoB = new THREE.Geometry();
+
+        function addBuilding(geo, cx, cz, groundY, halfW, halfD, height, angle) {
+            var v0 = geo.vertices.length;
+            var cosA = Math.cos(angle), sinA = Math.sin(angle);
+            function rot(x, z) { return { x: cx + x * cosA - z * sinA, z: cz + x * sinA + z * cosA }; }
+            var c0 = rot(-halfW, -halfD), c1 = rot(halfW, -halfD), c2 = rot(halfW, halfD), c3 = rot(-halfW, halfD);
+            var corners = [c0, c1, c2, c3];
+            for (var k = 0; k < 4; k++) geo.vertices.push(new THREE.Vector3(corners[k].x, groundY, corners[k].z));
+            for (k = 0; k < 4; k++) geo.vertices.push(new THREE.Vector3(corners[k].x, groundY + height, corners[k].z));
+
+            var sideIdx = [[0, 1], [1, 2], [2, 3], [3, 0]];
+            for (var s = 0; s < 4; s++) {
+                var a = v0 + sideIdx[s][0], b = v0 + sideIdx[s][1];
+                var at = a + 4, bt = b + 4;
+                geo.faces.push(new THREE.Face3(a, b, bt), new THREE.Face3(a, bt, at));
+                geo.faceVertexUvs[0].push(
+                    [new THREE.UV(0, 0), new THREE.UV(1, 0), new THREE.UV(1, 1)],
+                    [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(0, 1)]
+                );
+            }
+            // roof cap so nothing looks hollow from the chase camera on hills
+            geo.faces.push(new THREE.Face3(v0 + 4, v0 + 5, v0 + 6), new THREE.Face3(v0 + 4, v0 + 6, v0 + 7));
+            geo.faceVertexUvs[0].push(
+                [new THREE.UV(0, 0), new THREE.UV(1, 0), new THREE.UV(1, 1)],
+                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(0, 1)]
+            );
+        }
+
+        // Sample roughly ~90 slots around the loop regardless of how many
+        // spline points it has, then randomly skip some for natural gaps.
+        var slotStep = Math.max(1, Math.floor(n / 90));
+        for (var i = 0; i < n; i += slotStep) {
+            var p = path[i];
+            for (var side = -1; side <= 1; side += 2) {
+                if (rng() < 0.4) continue; // leave gaps, not a solid wall of buildings
+                var setback = layout.halfWidth + 24 + rng() * 100;
+                var bx = p.x + p.normal.x * setback * side;
+                var bz = p.z + p.normal.z * setback * side;
+                var halfW = 14 + rng() * 22;
+                var halfD = 14 + rng() * 22;
+                var height = 55 + rng() * 230;
+                var angle = Math.atan2(p.tangent.x, p.tangent.z);
+                var geo = rng() < 0.5 ? geoA : geoB;
+                addBuilding(geo, bx, bz, p.height, halfW, halfD, height, angle);
+            }
+        }
+
+        var meshes = [];
+        [[geoA, materialA], [geoB, materialB]].forEach(function(pair) {
+            var geo = pair[0], mat = pair[1];
+            if (geo.vertices.length === 0) return;
+            geo.computeFaceNormals();
+            geo.computeBoundingSphere();
+            var mesh = new THREE.Mesh(geo, mat);
+            mesh.doubleSided = true;
+            mesh.frustumCulled = false;
+            meshes.push(mesh);
+        });
+        return meshes;
+    }
+
     // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
     // The road and walls are textured with HexGL's own original diffuse
     // images (see buildProcedural below), tiled along the path using real
@@ -606,8 +698,17 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 if (roadTexture) { roadTexture.wrapS = roadTexture.wrapT = THREE.RepeatWrapping; roadTexture.needsUpdate = true; }
                 if (wallTexture) { wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping; wallTexture.needsUpdate = true; }
 
-                var trackMaterial = new THREE.MeshBasicMaterial({ map: roadTexture, color: theme.trackColor, wireframe: !!theme.wireframe });
-                var wallMaterial = new THREE.MeshBasicMaterial({ map: wallTexture, color: theme.sceneryColor, wireframe: !!theme.wireframe });
+                // Tint LIGHTLY (not a full-strength color multiply) so the
+                // actual original road/building photo texture still reads as
+                // itself -- a hard multiply here is what was making every
+                // track look like a flat recolored cutout instead of the
+                // original game's textured city. The theme identity now
+                // comes through as a color grade plus the tinted skybox,
+                // fog, and boost/heal pad colors, not by erasing the texture.
+                var trackTint = tintTowardsWhite(theme.trackColor, 0.22);
+                var wallTint = tintTowardsWhite(theme.sceneryColor, 0.28);
+                var trackMaterial = new THREE.MeshBasicMaterial({ map: roadTexture, color: trackTint, wireframe: !!theme.wireframe });
+                var wallMaterial = new THREE.MeshBasicMaterial({ map: wallTexture, color: wallTint, wireframe: !!theme.wireframe });
 
                 // Edge stripes need to read clearly against THIS theme's sky/fog
                 // color specifically (a fixed white or fixed dark color would fail
@@ -622,6 +723,22 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 scene.add(built.trackMesh);
                 scene.add(built.wallMesh);
                 scene.add(built.stripeMesh);
+
+                // --- BUILDINGS: real scraper photo textures (same art the
+                // original Cityscape uses for its skyscrapers) scattered
+                // along this track's own generated path, tinted to match
+                // the theme the same light way as the road/walls. Two
+                // textures (scrapers1/scrapers2) alternate per building for
+                // the same "not one repeated building" variety the original
+                // scene has. ---
+                var scraperTexA = this.lib.get("textures", "track.cityscape.scrapers1.diffuse");
+                var scraperTexB = this.lib.get("textures", "track.cityscape.scrapers2.diffuse");
+                var buildingTint = tintTowardsWhite(theme.sceneryColor, 0.3);
+                var buildingMatA = new THREE.MeshBasicMaterial({ map: scraperTexA || wallTexture, color: buildingTint, wireframe: !!theme.wireframe });
+                var buildingMatB = new THREE.MeshBasicMaterial({ map: scraperTexB || wallTexture, color: buildingTint, wireframe: !!theme.wireframe });
+                buildBuildingsMeshes(layout, buildingMatA, buildingMatB, theme.seed).forEach(function(mesh) {
+                    scene.add(mesh);
+                });
 
                 // --- BOOST PADS & HEAL PAD: visible markers using the game's
                 // own original bonus-pad art (materials.bonusBase / bonusSpeed),
