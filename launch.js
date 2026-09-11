@@ -36,6 +36,52 @@ if (sTrack) {
     }, false);
 }
 
+// Draws a small top-down outline of the track's actual generated loop onto
+// a canvas, so the select screen shows what shape you're about to drive
+// instead of just a flat color swatch. Uses the exact same generateLayout()
+// the real track uses (same seed = track.num), so the preview always
+// matches the real track.
+function drawTrackPreview(canvas, track) {
+    var ctx = canvas.getContext('2d');
+    var w = canvas.width, h = canvas.height;
+    ctx.fillStyle = hexColor(track.swatch);
+    ctx.fillRect(0, 0, w, h);
+
+    var internals = window.bkcore && bkcore.hexgl && bkcore.hexgl.tracks && bkcore.hexgl.tracks._proceduralInternals;
+    if (!internals) return;
+    var layout = internals.generateLayout(track.num);
+    var path = layout.path;
+
+    var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (var i = 0; i < path.length; i++) {
+        minX = Math.min(minX, path[i].x); maxX = Math.max(maxX, path[i].x);
+        minZ = Math.min(minZ, path[i].z); maxZ = Math.max(maxZ, path[i].z);
+    }
+    var pad = 8;
+    var spanX = (maxX - minX) || 1, spanZ = (maxZ - minZ) || 1;
+    var scale = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanZ);
+    var offX = (w - spanX * scale) / 2, offZ = (h - spanZ * scale) / 2;
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var j = 0; j <= path.length; j++) {
+        var p = path[j % path.length];
+        var px = (p.x - minX) * scale + offX;
+        var py = (p.z - minZ) * scale + offZ;
+        if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // start/finish marker
+    var sp0 = path[layout.checkpoints[0]];
+    ctx.fillStyle = '#ff6a3d';
+    ctx.beginPath();
+    ctx.arc((sp0.x - minX) * scale + offX, (sp0.z - minZ) * scale + offZ, 3, 0, Math.PI * 2);
+    ctx.fill();
+}
+
 var trackGrid = $('track-grid');
 if (trackGrid) {
     availableTracks.forEach(function(track, index) {
@@ -43,10 +89,12 @@ if (trackGrid) {
         card.className = 'track-card';
         card.setAttribute('data-index', index);
 
-        var swatch = document.createElement('div');
+        var swatch = document.createElement('canvas');
         swatch.className = 'swatch';
-        swatch.style.background = hexColor(track.swatch);
+        swatch.width = 220;
+        swatch.height = 76;
         card.appendChild(swatch);
+        drawTrackPreview(swatch, track);
 
         var num = document.createElement('div');
         num.className = 'tnum';
