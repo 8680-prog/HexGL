@@ -371,23 +371,33 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             var p = path[i];
             for (var side = -1; side <= 1; side += 2) {
                 if (rng() < 0.5) continue; // leave gaps, not a solid wall of buildings
-                var setback = layout.halfWidth + 24 + rng() * 100;
-                var bx = p.x + p.normal.x * setback * side;
-                var bz = p.z + p.normal.z * setback * side;
                 var halfW = 14 + rng() * 22;
                 var halfD = 14 + rng() * 22;
-                var height = 55 + rng() * 230;
+                // Hug the road closely, the way the original's towers sit
+                // right up against the highway rather than set well back
+                // from it -- but the gap is measured from the BUILDING'S
+                // NEAR FACE (setback - halfW), not its center, so a wide
+                // building can never clip back into the guardrail/road.
+                var setback = layout.halfWidth + halfW + 6 + rng() * 30;
+                var bx = p.x + p.normal.x * setback * side;
+                var bz = p.z + p.normal.z * setback * side;
                 var angle = Math.atan2(p.tangent.x, p.tangent.z);
                 var geo = rng() < 0.5 ? geoA : geoB;
-                // This is a flyover circuit, not a street-level one -- the
-                // road sits high above the city, not among its rooftops.
-                // Drop every building's base well below the road surface
-                // (with some per-building variety) so the skyline reads as
-                // a city seen from above, the way the original track does,
-                // instead of buildings sprouting from the same ground plane
-                // the ship drives on.
-                var cityDrop = 300 + rng() * 120;
-                addBuilding(geo, bx, bz, p.height - cityDrop, halfW, halfD, height, angle);
+                // The original's skyscrapers flank the elevated highway
+                // closely enough that some rise up to roughly road height
+                // (occasionally above it) while their bases disappear far
+                // below into the city -- that's what actually reads as
+                // "flying past towers" rather than either "buildings sitting
+                // on the road" (no drop at all) or "a city glimpsed far
+                // below" (dropping every building well under the road, which
+                // is what an earlier pass at this did). Pick each building's
+                // TOP relative to the road first, then extend a tall body
+                // downward from it, so the skyline actually interacts with
+                // the road's silhouette like the original's does.
+                var topOffset = -60 + rng() * 170; // roughly 60 below to 110 above the road
+                var height = 220 + rng() * 380;
+                var baseY = p.height + topOffset - height;
+                addBuilding(geo, bx, bz, baseY, halfW, halfD, height, angle);
             }
         }
 
@@ -405,65 +415,17 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
         return meshes;
     }
 
-    // ---- Cloud layer: sells the "flyover high above the city" read ----
-    // Camera-facing sprites (not meshes -- no geometry/tangent risk at all),
-    // using the game's own existing soft particle cloud texture. First cut
-    // of this scattered clouds from near the track center outward at a big
-    // scale, which put many large semi-transparent sprites close enough to
-    // the camera (and stacked enough in the same view direction) that their
-    // blending accumulated into a near-total white screen wash instead of a
-    // background cloud layer -- the opposite of the intended effect. Fixed
-    // by keeping every cloud small, low-opacity, spaced evenly by angle
-    // (never randomly clustered in one direction), and pushed out past the
-    // building field, so they read as a distant bank under the horizon
-    // rather than fog wrapped around the camera.
-    function buildCloudLayer(layout, cloudTexture, seed) {
-        var group = new THREE.Object3D();
-        if (!cloudTexture) return group;
-
-        var rng = makeRng((seed * 40503 + 17) >>> 0);
-        var outerRadius = layout.maxRadiusEstimate * 1.5;
-        var count = 14;
-
-        for (var i = 0; i < count; i++) {
-            // Evenly spaced around the loop with a little jitter, NOT fully
-            // random -- that's what previously let several big sprites land
-            // in the same view direction and stack into an opaque wall.
-            var ang = (i / count) * Math.PI * 2 + (rng() - 0.5) * (Math.PI * 2 / count) * 0.6;
-            var rr = outerRadius * (0.85 + rng() * 0.3); // stay past the building field
-            var x = Math.cos(ang) * rr;
-            var z = Math.sin(ang) * rr;
-            // Just below the road, well above the dropped-down buildings --
-            // a visible layer you're flying over, not a fog bank around you.
-            var y = -90 - rng() * 70;
-
-            var sprite = new THREE.Sprite({
-                map: cloudTexture,
-                color: 0xffffff,
-                blending: THREE.NormalBlending,
-                useScreenCoordinates: false
-            });
-            sprite.opacity = 0.22 + rng() * 0.16;
-            var scale = 110 + rng() * 90;
-            sprite.scale.set(scale, scale * (0.45 + rng() * 0.2), 1);
-            sprite.position.set(x, y, z);
-            group.add(sprite);
-        }
-
-        return group;
-    }
-
-    // A prior version of this also added one giant flat cloud-textured
-    // plane spanning the whole track's footprint for a guaranteed-visible
-    // cloud floor. Removed: a huge always-rendered (frustumCulled=false)
-    // transparent plane is exactly the kind of thing that's cheap on a
-    // desktop GPU and genuinely heavy on the integrated/mobile GPUs many
-    // people actually run this in a browser on (alpha-blended overdraw
-    // across a large chunk of the screen, every frame) -- it was a real
-    // contributor to reported lag. The sprite ring above stays: it's a
-    // couple dozen small quads instead of one screen-filling one, so it
-    // costs far less fill rate for a similar "there are clouds out there"
-    // read.
+    // A couple of earlier passes at this added standalone cloud sprites and
+    // a giant cloud-textured floor plane scattered around/under each track.
+    // Removed both: the brief is "every track should look like the original,
+    // only the route and the theme change" -- the original doesn't have
+    // literal cloud props floating around it, it has a skybox (with clouds
+    // painted into that photo) tinted by fog color, which this file already
+    // does per-theme below. That's the right place for "purple sky" to come
+    // from, not extra geometry. The removed floor plane was also a real
+    // performance cost (a huge always-rendered transparent plane is
+    // expensive fill-rate-wise on weaker/integrated GPUs) for a look that
+    // wasn't in the original anyway.
 
     // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
     // The road and walls are textured with HexGL's own original diffuse
@@ -640,14 +602,31 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 // stock "cube" shader samples the cubemap with no color
                 // control at all, so this is a small custom fragment shader
                 // -- same vertex shader and tCube/tFlip uniforms, plus one
-                // more uniform that multiplies the sampled color. Lifted
-                // toward white (never below ~0.35 per channel) so it reads as
-                // a color grade on the same sunset photo, not a black filter.
+                // more uniform that multiplies the sampled color.
+                //
+                // The tint is normalized to preserve HUE rather than just
+                // lifting raw channel values toward white: the old formula
+                // floored every channel at 0.35, which for a near-black
+                // theme color (e.g. the Abyssal Void tracks' 0x010105)
+                // pushes all three channels to almost the same ~0.35-0.36,
+                // i.e. flat neutral gray -- exactly the "should be a moody
+                // purple sky" case that was reading as nothing in
+                // particular. Scaling so the strongest channel hits a fixed
+                // target brightness keeps the actual color ratio (hue)
+                // intact at any input brightness, then a much lower floor
+                // (0.12) just keeps the darkest skies from going fully
+                // black/unreadable.
                 var skyshader = THREE.ShaderUtils.lib["cube"];
                 skyshader.uniforms["tCube"].texture = this.lib.get("texturesCube", "skybox.dawnclouds");
-                var tintR = 0.35 + 0.65 * (((theme.fogColor >> 16) & 0xff) / 255);
-                var tintG = 0.35 + 0.65 * (((theme.fogColor >> 8) & 0xff) / 255);
-                var tintB = 0.35 + 0.65 * ((theme.fogColor & 0xff) / 255);
+                var fr = ((theme.fogColor >> 16) & 0xff) / 255;
+                var fg = ((theme.fogColor >> 8) & 0xff) / 255;
+                var fb = (theme.fogColor & 0xff) / 255;
+                var tintFloor = 0.12;
+                var tintPeak = 0.85;
+                var tintNorm = tintPeak / Math.max(fr, fg, fb, 0.001);
+                var tintR = tintFloor + (1 - tintFloor) * Math.min(1, fr * tintNorm);
+                var tintG = tintFloor + (1 - tintFloor) * Math.min(1, fg * tintNorm);
+                var tintB = tintFloor + (1 - tintFloor) * Math.min(1, fb * tintNorm);
                 var tintedUniforms = {
                     tCube: skyshader.uniforms.tCube,
                     tFlip: skyshader.uniforms.tFlip,
@@ -825,13 +804,6 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 buildBuildingsMeshes(layout, buildingMatA, buildingMatB, theme.seed).forEach(function(mesh) {
                     scene.add(mesh);
                 });
-
-                // --- CLOUD LAYER: sits between the road and the dropped-down
-                // city below, so the track reads as a flyover high above the
-                // clouds rather than a road sitting on the ground next to the
-                // skyline. ---
-                var cloudTexture = this.lib.get("textures", "cloud");
-                scene.add(buildCloudLayer(layout, cloudTexture, theme.seed));
 
                 // --- BOOST PADS & HEAL PAD: visible markers using the game's
                 // own original bonus-pad art (materials.bonusBase / bonusSpeed),
