@@ -1,4 +1,4 @@
- /*
+/*
  * HexGL
  * @author Thibaut 'BKcore' Despoulain <http://bkcore.com>
  * @license This work is licensed under the Creative Commons Attribution-NonCommercial 3.0 Unported License. 
@@ -46,7 +46,12 @@ bkcore.hexgl.Gameplay = function(opts)
 	this.lap = 1;
 	this.lapTimes = [];
 	this.lapTimeElapsed = 0;
-	this.maxLaps = 3;
+	// Each track defines its own lap count (TrackData.js: 3, 4 or 5 laps
+	// depending on the track) -- this used to be hardcoded to 3 here, so
+	// every race finished after 3 laps regardless of what the track select
+	// screen advertised. Read it off the actual track object instead, with
+	// 3 as a safe fallback for the original single-track setup.
+	this.maxLaps = (opts.track && opts.track.laps) ? opts.track.laps : 3;
 	this.score = null;
 	this.finishTime = null;
 	this.onFinish = opts.onFinish == undefined ? function(){console.log("FINISH");} : opts.onFinish;
