@@ -108,6 +108,19 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             path[i].normal = { x: -tz, z: tx }; // perpendicular, world XZ plane
         }
 
+        // Cumulative arc length along the path, used later to tile the road/
+        // wall textures at a consistent real-world scale instead of stretching
+        // one texture repeat across the whole loop regardless of its length.
+        // Distances are unaffected by the rotation applied further down, so
+        // computing this now (pre-rotation) is equivalent to doing it after.
+        path[0].arc = 0;
+        for (i = 1; i < total; i++) {
+            var dx = path[i].x - path[i - 1].x, dz = path[i].z - path[i - 1].z;
+            path[i].arc = path[i - 1].arc + Math.sqrt(dx * dx + dz * dz);
+        }
+        var lastDx = path[0].x - path[total - 1].x, lastDz = path[0].z - path[total - 1].z;
+        var totalLength = path[total - 1].arc + Math.sqrt(lastDx * lastDx + lastDz * lastDz);
+
         var checkpointCount = 3 + Math.floor(rng() * 3); // 3..5 (includes start/finish)
         var checkpoints = [];
         for (i = 0; i < checkpointCount; i++) {
@@ -148,7 +161,7 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             p.normal.x = ntx; p.normal.z = ntz;
         }
 
-        var boostPadCount = Math.floor(rng() * 3); // 0..2
+        var boostPadCount = 1 + Math.floor(rng() * 3); // 1..3, always at least one
         var boostPads = [];
         for (i = 0; i < boostPadCount; i++) {
             // keep boost pads away from the start/finish line
@@ -156,12 +169,27 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             boostPads.push(idx);
         }
 
+        // One randomized heal/shield pad, kept clear of the start line and
+        // every boost pad so they never overlap on the road.
+        var healPadIndex = null;
+        for (var attempt = 0; attempt < 12; attempt++) {
+            var candidate = Math.floor(rng() * total);
+            var minSep = total * 0.12;
+            var farEnough = Math.abs(candidate - 0) > minSep && Math.abs(candidate - total) > minSep;
+            for (var bp = 0; bp < boostPads.length && farEnough; bp++) {
+                if (Math.min(Math.abs(candidate - boostPads[bp]), total - Math.abs(candidate - boostPads[bp])) < minSep) farEnough = false;
+            }
+            if (farEnough) { healPadIndex = candidate; break; }
+        }
+
         return {
             path: path,
             halfWidth: halfWidth,
             checkpoints: checkpoints,
             boostPads: boostPads,
+            healPadIndex: healPadIndex,
             hilly: hilly,
+            totalLength: totalLength,
             maxRadiusEstimate: baseRadius * 1.32 + halfWidth
         };
     }
@@ -267,24 +295,29 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
     }
 
     // ---- Build a drivable ribbon mesh (old three.js r50 Geometry API: vertices/faces, no BufferGeometry) ----
-    // Also builds bright edge-stripe geometry: a flat, single-color track
-    // surface reads as "empty space" whenever its color happens to be close
-    // to the sky/fog color (confirmed by testing -- the track was rendering
-    // correctly the whole time, it just wasn't visually distinguishable from
-    // the sky in several color themes). Two high-contrast stripes along the
-    // track edges fix that regardless of the theme's color choices, and also
-    // give the driver perspective/depth cues down the track.
-    function buildRibbonMesh(layout, trackMaterials, wallMaterial, stripeMaterial) {
+    // The road and walls are textured with HexGL's own original diffuse
+    // images (see buildProcedural below), tiled along the path using real
+    // arc length so the texture repeats at a consistent scale regardless of
+    // how long an individual track's loop is, instead of stretching one
+    // repeat across the whole thing. Bright edge-stripe geometry is layered
+    // on top for navigation contrast, since a track's road color can still
+    // occasionally read close to its sky color from a distance.
+    function buildRibbonMesh(layout, trackMaterial, wallMaterial, stripeMaterial, tileLength) {
         var path = layout.path;
         var n = path.length;
         var hw = layout.halfWidth;
         var stripeWidth = Math.min(7, hw * 0.16);
         var stripeLift = 0.4; // avoid z-fighting with the main surface
+        var uRepeatsAcrossWidth = Math.max(1, Math.round((hw * 2) / tileLength));
 
         var geo = new THREE.Geometry();
         var wallGeo = new THREE.Geometry();
         var stripeGeo = new THREE.Geometry();
-        var wallHeight = 22;
+        // Low guardrail-height, not a tall canyon wall -- the original
+        // Cityscape track is an open elevated road with the city and sky
+        // visible around it, not a walled-in tunnel. A short edge barrier
+        // keeps the collision boundary readable without enclosing the view.
+        var wallHeight = 5;
 
         for (var i = 0; i < n; i++) {
             var p = path[i];
@@ -312,21 +345,17 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             var a = 2 * i, b = 2 * i + 1;
             var c = 2 * ((i + 1) % n), d = 2 * ((i + 1) % n) + 1;
 
-            // Alternate a light/dark material band every few segments, purely
-            // for depth perception: a single flat, unlit, textureless color
-            // filling most of the screen up close (before the track narrows
-            // toward the horizon) gives the driver no sense of speed or
-            // distance. materialIndex picks between the two shades set up by
-            // the caller (geo.materials[0]/[1]).
-            var band = Math.floor(i / 4) % 2;
+            // v tiles along real arc length (not 0..1 over the whole loop),
+            // so the road texture repeats at a consistent world-space scale
+            // on every track regardless of that track's total length.
+            var arcI = path[i].arc / tileLength;
+            var arcNext = (i === n - 1 ? (path[i].arc + (path[0].arc + layout.totalLength - path[i].arc)) : path[i + 1].arc) / tileLength;
             var f1 = new THREE.Face3(a, b, d);
             var f2 = new THREE.Face3(a, d, c);
-            f1.materialIndex = band;
-            f2.materialIndex = band;
             geo.faces.push(f1, f2);
             geo.faceVertexUvs[0].push(
-                [new THREE.UV(0, i / n), new THREE.UV(1, i / n), new THREE.UV(1, (i + 1) / n)],
-                [new THREE.UV(0, i / n), new THREE.UV(1, (i + 1) / n), new THREE.UV(0, (i + 1) / n)]
+                [new THREE.UV(0, arcI), new THREE.UV(uRepeatsAcrossWidth, arcI), new THREE.UV(uRepeatsAcrossWidth, arcNext)],
+                [new THREE.UV(0, arcI), new THREE.UV(uRepeatsAcrossWidth, arcNext), new THREE.UV(0, arcNext)]
             );
 
             var la = 4 * i, lb = 4 * i + 1, ra = 4 * i + 2, rb = 4 * i + 3;
@@ -338,10 +367,10 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             // right wall (facing inward)
             wallGeo.faces.push(new THREE.Face3(ra, rc, rd), new THREE.Face3(ra, rd, rb));
             wallGeo.faceVertexUvs[0].push(
-                [new THREE.UV(0, 0), new THREE.UV(0, 1), new THREE.UV(1, 1)],
-                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(1, 0)],
-                [new THREE.UV(0, 0), new THREE.UV(0, 1), new THREE.UV(1, 1)],
-                [new THREE.UV(0, 0), new THREE.UV(1, 1), new THREE.UV(1, 0)]
+                [new THREE.UV(arcI, 0), new THREE.UV(arcI, 1), new THREE.UV(arcNext, 1)],
+                [new THREE.UV(arcI, 0), new THREE.UV(arcNext, 1), new THREE.UV(arcNext, 0)],
+                [new THREE.UV(arcI, 0), new THREE.UV(arcI, 1), new THREE.UV(arcNext, 1)],
+                [new THREE.UV(arcI, 0), new THREE.UV(arcNext, 1), new THREE.UV(arcNext, 0)]
             );
 
             // Edge stripes: leftOuter(0)-leftInner(1) strip, rightInner(2)-rightOuter(3) strip
@@ -373,9 +402,7 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
         wallGeo.computeBoundingSphere();
         stripeGeo.computeBoundingSphere();
 
-        geo.materials = trackMaterials;
-        var trackFaceMaterial = new THREE.MeshFaceMaterial();
-        var trackMesh = new THREE.Mesh(geo, trackFaceMaterial);
+        var trackMesh = new THREE.Mesh(geo, trackMaterial);
         trackMesh.doubleSided = true;
         trackMesh.frustumCulled = false;
         var wallMesh = new THREE.Mesh(wallGeo, wallMaterial);
@@ -430,12 +457,39 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 var cameraCube = new THREE.PerspectiveCamera(70, display.width / display.height, 1, 6000);
                 sceneCube.add(cameraCube);
 
+                // Tint the skybox photo per theme so each track's background
+                // actually looks different (not just the fog/ground). The
+                // stock "cube" shader samples the cubemap with no color
+                // control at all, so this is a small custom fragment shader
+                // -- same vertex shader and tCube/tFlip uniforms, plus one
+                // more uniform that multiplies the sampled color. Lifted
+                // toward white (never below ~0.35 per channel) so it reads as
+                // a color grade on the same sunset photo, not a black filter.
                 var skyshader = THREE.ShaderUtils.lib["cube"];
                 skyshader.uniforms["tCube"].texture = this.lib.get("texturesCube", "skybox.dawnclouds");
+                var tintR = 0.35 + 0.65 * (((theme.fogColor >> 16) & 0xff) / 255);
+                var tintG = 0.35 + 0.65 * (((theme.fogColor >> 8) & 0xff) / 255);
+                var tintB = 0.35 + 0.65 * ((theme.fogColor & 0xff) / 255);
+                var tintedUniforms = {
+                    tCube: skyshader.uniforms.tCube,
+                    tFlip: skyshader.uniforms.tFlip,
+                    tintColor: { type: 'c', value: new THREE.Color(0).setRGB(tintR, tintG, tintB) }
+                };
+                var tintedFragmentShader = [
+                    'uniform samplerCube tCube;',
+                    'uniform float tFlip;',
+                    'uniform vec3 tintColor;',
+                    'varying vec3 vViewPosition;',
+                    'void main() {',
+                    'vec3 wPos = cameraPosition - vViewPosition;',
+                    'vec4 texel = textureCube( tCube, vec3( tFlip * wPos.x, wPos.yz ) );',
+                    'gl_FragColor = vec4( texel.rgb * tintColor, texel.a );',
+                    '}'
+                ].join('\n');
                 var skymaterial = new THREE.ShaderMaterial({
-                    fragmentShader: skyshader.fragmentShader,
+                    fragmentShader: tintedFragmentShader,
                     vertexShader: skyshader.vertexShader,
-                    uniforms: skyshader.uniforms,
+                    uniforms: tintedUniforms,
                     depthWrite: false
                 });
                 var skymesh = new THREE.Mesh(new THREE.CubeGeometry(100, 100, 100), skymaterial);
@@ -530,18 +584,31 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 display.components.shipEffects = new bkcore.hexgl.ShipEffects(fxParams);
 
                 // --- PROCEDURAL TRACK MESH ---
-                // Two alternating floor shades (light/dark bands every 4
-                // segments) so the road reads as a receding surface with a
-                // sense of speed/distance even up close, where a single flat
-                // unlit color would otherwise fill most of the screen
-                // uniformly. Darken by scaling toward black rather than
-                // picking an unrelated color, so it still reads as "the same
-                // road" rather than a second stripe color.
-                var tr = (theme.trackColor >> 16) & 0xff, tg = (theme.trackColor >> 8) & 0xff, tb = theme.trackColor & 0xff;
-                var trackColorDark = (Math.round(tr * 0.62) << 16) | (Math.round(tg * 0.62) << 8) | Math.round(tb * 0.62);
-                var trackMaterial = new THREE.MeshBasicMaterial({ color: theme.trackColor });
-                var trackMaterialDark = new THREE.MeshBasicMaterial({ color: trackColorDark });
-                var wallMaterial = new THREE.MeshBasicMaterial({ color: theme.sceneryColor, wireframe: !!theme.wireframe });
+                // Use HexGL's own original road/building textures (not flat
+                // colors) so the track reads as "the original game", tiled
+                // along real arc length so the repeat scale looks right
+                // regardless of a given track's total loop length. Each
+                // theme tints its own road/wall color on top of the same
+                // shared texture (multiply), which is how the game already
+                // reads as "different track, same visual language" rather
+                // than 50 unrelated art styles.
+                var TILE_LENGTH = 90; // world units per texture repeat
+                var roadTexture = this.lib.get("textures", "track.cityscape.diffuse");
+                var wallTexture = this.lib.get("textures", "track.cityscape.scrapers1.diffuse");
+                // NPOT textures (this build's HIGH-quality scrapers art isn't
+                // power-of-two) can't tile with REPEAT under WebGL1 -- fall
+                // back to the always-POT road texture for walls too rather
+                // than risk a silently-clamped, stretched-looking wall.
+                var wallTexIsPOT = wallTexture && wallTexture.image &&
+                    (wallTexture.image.width & (wallTexture.image.width - 1)) === 0 &&
+                    (wallTexture.image.height & (wallTexture.image.height - 1)) === 0;
+                if (!wallTexIsPOT) wallTexture = roadTexture;
+                if (roadTexture) { roadTexture.wrapS = roadTexture.wrapT = THREE.RepeatWrapping; roadTexture.needsUpdate = true; }
+                if (wallTexture) { wallTexture.wrapS = wallTexture.wrapT = THREE.RepeatWrapping; wallTexture.needsUpdate = true; }
+
+                var trackMaterial = new THREE.MeshBasicMaterial({ map: roadTexture, color: theme.trackColor, wireframe: !!theme.wireframe });
+                var wallMaterial = new THREE.MeshBasicMaterial({ map: wallTexture, color: theme.sceneryColor, wireframe: !!theme.wireframe });
+
                 // Edge stripes need to read clearly against THIS theme's sky/fog
                 // color specifically (a fixed white or fixed dark color would fail
                 // for some of the 50 themes -- e.g. white stripes vanish against
@@ -551,10 +618,133 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 var fogLuminance = 0.299 * fr + 0.587 * fg + 0.114 * fb;
                 var stripeColor = fogLuminance > 150 ? 0x101010 : 0xffffff;
                 var stripeMaterial = new THREE.MeshBasicMaterial({ color: stripeColor });
-                var built = buildRibbonMesh(layout, [trackMaterial, trackMaterialDark], wallMaterial, stripeMaterial);
+                var built = buildRibbonMesh(layout, trackMaterial, wallMaterial, stripeMaterial, TILE_LENGTH);
                 scene.add(built.trackMesh);
                 scene.add(built.wallMesh);
                 scene.add(built.stripeMesh);
+
+                // --- BOOST PADS & HEAL PAD: visible markers using the game's
+                // own original bonus-pad art (materials.bonusBase / bonusSpeed),
+                // placed at the layout's generated pad locations. ---
+                var padMaterial = this.materials.bonusBase || new THREE.MeshBasicMaterial({ color: 0x888888 });
+                var boostGlowMaterial = this.materials.bonusSpeed || new THREE.MeshBasicMaterial({ color: 0x0096ff });
+                var healGlowMaterial = new THREE.MeshBasicMaterial({ color: 0x33ff88 });
+
+                function makePad(p, glowMaterial) {
+                    // Same frustumCulled/boundingSphere issue as the ribbon mesh
+                    // (see buildRibbonMesh) applies to any THREE.Mesh here too --
+                    // disable culling outright rather than risk it silently
+                    // vanishing again.
+                    var group = new THREE.Object3D();
+                    var baseGeo = new THREE.CubeGeometry(hwPadSize(layout), 1.2, hwPadSize(layout));
+                    baseGeo.computeBoundingSphere();
+                    var base = new THREE.Mesh(baseGeo, padMaterial);
+                    base.position.set(p.x, p.height + 0.6, p.z);
+                    base.frustumCulled = false;
+                    var glowGeo = new THREE.CubeGeometry(hwPadSize(layout) * 0.7, 2.2, hwPadSize(layout) * 0.7);
+                    glowGeo.computeBoundingSphere();
+                    var glow = new THREE.Mesh(glowGeo, glowMaterial);
+                    glow.position.set(p.x, p.height + 1.6, p.z);
+                    glow.frustumCulled = false;
+                    group.add(base);
+                    group.add(glow);
+                    return group;
+                }
+                function hwPadSize(l) { return Math.min(18, l.halfWidth * 0.4); }
+
+                layout.boostPads.forEach(function(idx) {
+                    scene.add(makePad(layout.path[idx], boostGlowMaterial));
+                });
+
+                // One randomized, single-use heal/shield pad per track. "Single
+                // use" is enforced at runtime below (see render loop): once the
+                // ship passes through it once, it won't heal again this race.
+                var healIdx = layout.healPadIndex;
+                var healPadMesh = null;
+                var healUsed = false;
+                if (healIdx != null) {
+                    healPadMesh = makePad(layout.path[healIdx], healGlowMaterial);
+                    scene.add(healPadMesh);
+                }
+
+                // --- MINIMAP (top-right, drawn each frame in the render loop below) ---
+                var minimapSize = 150;
+                var minimapCanvas = document.createElement('canvas');
+                minimapCanvas.width = minimapSize;
+                minimapCanvas.height = minimapSize;
+                // index.html has a global `canvas { width: 100% }` rule meant
+                // for the main WebGL canvas -- it also matches this minimap
+                // canvas and was blowing it up to fill most of the screen.
+                // Explicit inline width/height (higher specificity than the
+                // stylesheet rule) pins it back to its real size.
+                minimapCanvas.style.position = 'absolute';
+                minimapCanvas.style.top = '14px';
+                minimapCanvas.style.right = '14px';
+                minimapCanvas.style.width = minimapSize + 'px';
+                minimapCanvas.style.height = minimapSize + 'px';
+                minimapCanvas.style.zIndex = '9998';
+                minimapCanvas.style.borderRadius = '50%';
+                minimapCanvas.style.border = '2px solid rgba(255,255,255,0.55)';
+                minimapCanvas.style.background = 'rgba(0,0,0,0.4)';
+                minimapCanvas.style.pointerEvents = 'none';
+                (display.containers.overlay || document.body).appendChild(minimapCanvas);
+                var minimapCtx = minimapCanvas.getContext('2d');
+
+                // Precompute the track's screen-space points once -- the loop
+                // shape itself never changes, only the ship marker moves.
+                var mmMinX = Infinity, mmMaxX = -Infinity, mmMinZ = Infinity, mmMaxZ = -Infinity;
+                for (i = 0; i < layout.path.length; i++) {
+                    mmMinX = Math.min(mmMinX, layout.path[i].x); mmMaxX = Math.max(mmMaxX, layout.path[i].x);
+                    mmMinZ = Math.min(mmMinZ, layout.path[i].z); mmMaxZ = Math.max(mmMaxZ, layout.path[i].z);
+                }
+                var mmSpan = Math.max(mmMaxX - mmMinX, mmMaxZ - mmMinZ) || 1;
+                var mmPad = minimapSize * 0.14;
+                var mmScale = (minimapSize - mmPad * 2) / mmSpan;
+                var mmOffX = (minimapSize - (mmMaxX - mmMinX) * mmScale) / 2;
+                var mmOffZ = (minimapSize - (mmMaxZ - mmMinZ) * mmScale) / 2;
+                function mmProject(x, z) {
+                    return {
+                        x: (x - mmMinX) * mmScale + mmOffX,
+                        y: (z - mmMinZ) * mmScale + mmOffZ
+                    };
+                }
+                var mmPathPx = layout.path.map(function(p) { return mmProject(p.x, p.z); });
+
+                function drawMinimap(shipX, shipZ) {
+                    minimapCtx.clearRect(0, 0, minimapSize, minimapSize);
+                    minimapCtx.lineWidth = 3;
+                    minimapCtx.strokeStyle = 'rgba(255,255,255,0.85)';
+                    minimapCtx.beginPath();
+                    for (var k = 0; k <= mmPathPx.length; k++) {
+                        var pt = mmPathPx[k % mmPathPx.length];
+                        if (k === 0) minimapCtx.moveTo(pt.x, pt.y); else minimapCtx.lineTo(pt.x, pt.y);
+                    }
+                    minimapCtx.closePath();
+                    minimapCtx.stroke();
+
+                    // boost pads (blue) + heal pad (green, hidden once used)
+                    minimapCtx.fillStyle = '#33aaff';
+                    layout.boostPads.forEach(function(idx) {
+                        var pp = mmPathPx[idx];
+                        minimapCtx.beginPath();
+                        minimapCtx.arc(pp.x, pp.y, 3.5, 0, Math.PI * 2);
+                        minimapCtx.fill();
+                    });
+                    if (healIdx != null && !healUsed) {
+                        var hp = mmPathPx[healIdx];
+                        minimapCtx.fillStyle = '#33ff88';
+                        minimapCtx.beginPath();
+                        minimapCtx.arc(hp.x, hp.y, 4, 0, Math.PI * 2);
+                        minimapCtx.fill();
+                    }
+
+                    // ship marker
+                    var sp = mmProject(shipX, shipZ);
+                    minimapCtx.fillStyle = '#ff6a3d';
+                    minimapCtx.beginPath();
+                    minimapCtx.arc(sp.x, sp.y, 5, 0, Math.PI * 2);
+                    minimapCtx.fill();
+                }
 
                 // --- CAMERA ---
                 display.components.cameraChase = new bkcore.hexgl.CameraChase({
@@ -573,6 +763,23 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                     this.objects.components.shipControls.update(dt);
                     this.objects.components.shipEffects.update(dt);
                     this.objects.components.cameraChase.update(dt, this.objects.components.shipControls.getSpeedRatio());
+
+                    // Single-use heal pad: proximity check against the ship's
+                    // current position (kept simple -- flat-plane XZ distance --
+                    // rather than sampling another bitmap channel like boost
+                    // pads do). Once triggered, hide the marker and never heal
+                    // again this race.
+                    if (healIdx != null && !healUsed) {
+                        var shipPos = this.objects.components.shipControls.dummy.position;
+                        var healPt = layout.path[healIdx];
+                        var hdx = shipPos.x - healPt.x, hdz = shipPos.z - healPt.z;
+                        if (Math.sqrt(hdx * hdx + hdz * hdz) < hwPadSize(layout) * 1.6) {
+                            this.objects.components.shipControls.shield = this.objects.components.shipControls.maxShield;
+                            healUsed = true;
+                            if (healPadMesh) healPadMesh.visible = false;
+                        }
+                    }
+                    drawMinimap(this.objects.components.shipControls.dummy.position.x, this.objects.components.shipControls.dummy.position.z);
                     // camera.matrixAutoUpdate is disabled (see where `camera` is
                     // created) so updateMatrixWorld() won't rebuild the matrix from
                     // Euler .rotation -- but that also means the translation this
