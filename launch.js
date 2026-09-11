@@ -7,23 +7,103 @@ var hud = true;
 var controlType = 0;
 var godmode = false;
 
-var availableTracks = [
-    { id: 'Cityscape_Prime', name: 'Cityscape Prime' },
-    { id: 'Cyber_Neon', name: 'Cyber Neon Night' },
-    { id: 'Martian_Canyon', name: 'Martian Canyon' },
-    { id: 'Toxic_Sector', name: 'Toxic Sector' },
-    { id: 'Abyssal_Void', name: 'Abyssal Void' }
-];
+// availableTracks: built from the shared 50-track data list (TrackData.js).
+// Falls back to the original single Cityscape track if that file failed to load.
+var availableTracks = (typeof HEXGL_TRACK_LIST !== 'undefined' && HEXGL_TRACK_LIST.length)
+    ? HEXGL_TRACK_LIST.map(function(t) {
+        return { id: t.id, name: t.name, laps: t.laps, num: t.num, wireframe: t.wireframe, swatch: t.trackColor };
+      })
+    : [{ id: 'Cityscape_Prime', name: 'Cityscape Prime', laps: 3, num: 1, wireframe: false, swatch: 0x2fa8ff }];
+
 var selectedTrackIndex = 0;
 
-// Track Selector Toggle
+function hexColor(n) {
+    return '#' + (n >>> 0).toString(16).padStart(6, '0');
+}
+
+function setSelectedTrack(index) {
+    selectedTrackIndex = index;
+    var track = availableTracks[selectedTrackIndex];
+    var sTrack = $('s-track');
+    if (sTrack) sTrack.innerText = 'Track: ' + track.name;
+}
+
+// Track Selector: opens the Polytrack-style track grid instead of cycling in place.
 var sTrack = $('s-track');
 if (sTrack) {
     sTrack.addEventListener('click', function() {
-        selectedTrackIndex = (selectedTrackIndex + 1) % availableTracks.length;
-        this.innerText = 'Track: ' + availableTracks[selectedTrackIndex].name;
+        openTrackSelect();
     }, false);
 }
+
+var trackGrid = $('track-grid');
+if (trackGrid) {
+    availableTracks.forEach(function(track, index) {
+        var card = document.createElement('div');
+        card.className = 'track-card';
+        card.setAttribute('data-index', index);
+
+        var swatch = document.createElement('div');
+        swatch.className = 'swatch';
+        swatch.style.background = hexColor(track.swatch);
+        card.appendChild(swatch);
+
+        var num = document.createElement('div');
+        num.className = 'tnum';
+        num.innerText = '#' + track.num;
+        card.appendChild(num);
+
+        var info = document.createElement('div');
+        info.className = 'info';
+
+        var name = document.createElement('div');
+        name.className = 'tname';
+        name.innerText = track.name;
+        info.appendChild(name);
+
+        var meta = document.createElement('div');
+        meta.className = 'tmeta';
+        meta.innerHTML = '<span>' + track.laps + ' laps</span>' +
+            (track.wireframe ? '<span class="wf">WIREFRAME</span>' : '<span></span>');
+        info.appendChild(meta);
+
+        card.appendChild(info);
+
+        card.addEventListener('click', function() {
+            setSelectedTrack(index);
+            document.querySelectorAll('.track-card.selected').forEach(function(el) {
+                el.classList.remove('selected');
+            });
+            card.classList.add('selected');
+            closeTrackSelect();
+        }, false);
+
+        trackGrid.appendChild(card);
+    });
+}
+
+function openTrackSelect() {
+    $('step-1').style.display = 'none';
+    $('track-select').style.display = 'block';
+    var cards = document.querySelectorAll('.track-card');
+    if (cards[selectedTrackIndex]) {
+        cards[selectedTrackIndex].classList.add('selected');
+        cards[selectedTrackIndex].scrollIntoView({ block: 'center' });
+    }
+}
+
+function closeTrackSelect() {
+    $('track-select').style.display = 'none';
+    $('step-1').style.display = 'block';
+}
+
+var trackSelectClose = $('track-select-close');
+if (trackSelectClose) {
+    trackSelectClose.addEventListener('click', closeTrackSelect, false);
+}
+
+// Initialize default selection label
+setSelectedTrack(0);
 
 // Controls Toggle
 var sControlType = $('s-controlType');
