@@ -1,4 +1,4 @@
- /*
+/*
  * HexGL
  * @author Thibaut 'BKcore' Despoulain <http://bkcore.com>
  * @license This work is licensed under the Creative Commons Attribution-NonCommercial 3.0 Unported License.
@@ -248,22 +248,29 @@ bkcore.hexgl.ShipControls = function(ctx)
 		lc.connect();
 	}
 
+	// WASD is now a full alternate control scheme alongside the arrow keys:
+	// W/A/S/D drive forward/left/backward/right exactly like the arrow keys
+	// do. That reuses the A and D keycodes that used to double as the air
+	// brake triggers (ltrigger/rtrigger) -- those keep working on Q and E,
+	// they just no longer also fire on A/D, since A/D now always mean
+	// steering, never air brake.
 	function onKeyDown(event)
 	{
 		switch(event.keyCode)
 		{
 			case 38: /*up*/	self.key.forward = true; break;
+			case 87: /*W*/	self.key.forward = true; break;
 
 			case 40: /*down*/self.key.backward = true; break;
+			case 83: /*S*/self.key.backward = true; break;
 
 			case 37: /*left*/self.key.left = true; break;
+			case 65: /*A*/self.key.left = true; break;
 
 			case 39: /*right*/self.key.right = true; break;
+			case 68: /*D*/self.key.right = true; break;
 
 			case 81: /*Q*/self.key.ltrigger = true; break;
-			case 65: /*A*/self.key.ltrigger = true; break;
-
-			case 68: /*D*/self.key.rtrigger = true; break;
 			case 69: /*E*/self.key.rtrigger = true; break;
 		}
 	};
@@ -273,17 +280,18 @@ bkcore.hexgl.ShipControls = function(ctx)
 		switch(event.keyCode)
 		{
 			case 38: /*up*/	self.key.forward = false; break;
+			case 87: /*W*/	self.key.forward = false; break;
 
 			case 40: /*down*/self.key.backward = false; break;
+			case 83: /*S*/self.key.backward = false; break;
 
 			case 37: /*left*/self.key.left = false; break;
+			case 65: /*A*/self.key.left = false; break;
 
 			case 39: /*right*/self.key.right = false; break;
+			case 68: /*D*/self.key.right = false; break;
 
 			case 81: /*Q*/self.key.ltrigger = false; break;
-			case 65: /*A*/self.key.ltrigger = false; break;
-
-			case 68: /*D*/self.key.rtrigger = false; break;
 			case 69: /*E*/self.key.rtrigger = false; break;
 		}
 	};
