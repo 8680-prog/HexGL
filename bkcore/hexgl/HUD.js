@@ -1,4 +1,4 @@
- /*
+/*
  * HexGL
  * @author Thibaut 'BKcore' Despoulain <http://bkcore.com>
  * @license This work is licensed under the Creative Commons Attribution-NonCommercial 3.0 Unported License. 
@@ -204,12 +204,14 @@ bkcore.hexgl.HUD.prototype.update = function(speed, speedRatio, shield, shieldRa
 		    this.ctx.fillText(this.time, SCREEN_HW, SCREEN_WIDTH/this.timeMarginRatio);
 		}
 
-		// LAPS
+		// LAPS -- drawn top-LEFT (was top-right) so it doesn't sit underneath
+		// the top-right minimap overlay, where it was getting visually
+		// covered up.
 		if(this.lap != "")
 		{
 			this.ctx.font = (SCREEN_WIDTH/this.timeFontRatio)+"px "+this.font;
 		    this.ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
-		    this.ctx.fillText(this.lap, SCREEN_WIDTH-SCREEN_WIDTH/this.lapMarginRatio, SCREEN_WIDTH/this.timeMarginRatio);
+		    this.ctx.fillText(this.lap, SCREEN_WIDTH/this.lapMarginRatio, SCREEN_WIDTH/this.timeMarginRatio);
 		}
 
 	    // MESSAGE
