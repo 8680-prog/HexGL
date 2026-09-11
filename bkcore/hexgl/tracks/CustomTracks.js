@@ -5,8 +5,17 @@
  * TrackData.js (HEXGL_TRACK_LIST). Every entry reuses the same Cityscape
  * circuit (geometry, checkpoints, spawn) but overrides fog, track/scenery
  * colors, wireframe mode and lap count so each track looks and plays
- * differently, in the spirit of the original hand-written theme overrides
- * this file used to contain.
+ * differently.
+ *
+ * IMPORTANT FIX: the HexGL instance passed into buildScenes (called `ctx`
+ * in Cityscape.js, `display` here) does NOT expose the live THREE.Scene as
+ * `display.scene` -- there is no such property. The actual scene is stored
+ * inside the render manager and must be read back via
+ * `display.manager.get("game").scene`. The previous version of this file
+ * checked `display.scene` directly, which was always undefined, so the
+ * `if (!display || !display.scene) return;` guard silently bailed out on
+ * every single track and none of the re-theming below ever ran -- every
+ * track rendered as plain, unmodified Cityscape. Fixed below.
  */
 var bkcore = bkcore || {};
 bkcore.hexgl = bkcore.hexgl || {};
@@ -33,16 +42,28 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
             load: cityscape.load,
             buildMaterials: cityscape.buildMaterials,
 
-            buildScenes: function(display) {
-                cityscape.buildScenes.call(this, display);
+            buildScenes: function(display, quality) {
+                // Remember the untouched road material reference BEFORE
+                // buildScenes clones/assigns materials onto meshes, so we
+                // can tell the road mesh apart from scenery meshes below
+                // (Cityscape.js never sets mesh.name, so name-based
+                // matching doesn't work).
+                var trackMaterialRef = this.materials.track;
 
-                if (!display || !display.scene) return;
+                // Forward both arguments -- the original wrapper dropped
+                // `quality`, which silently disabled shadows/particles.
+                cityscape.buildScenes.call(this, display, quality);
+
+                if (!display || !display.manager) return;
+                var setup = display.manager.get("game");
+                if (!setup || !setup.scene) return;
+                var scene = setup.scene;
 
                 // 1. Fog and Environment Adjustments
-                if (display.scene.fog) {
-                    display.scene.fog.color.setHex(theme.fogColor);
-                    if (display.scene.fog.near) display.scene.fog.near = theme.fogNear;
-                    if (display.scene.fog.far) display.scene.fog.far = theme.fogFar;
+                if (scene.fog) {
+                    scene.fog.color.setHex(theme.fogColor);
+                    if (scene.fog.near) scene.fog.near = theme.fogNear;
+                    if (scene.fog.far) scene.fog.far = theme.fogFar;
                 }
 
                 if (display.renderer) {
@@ -54,13 +75,21 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                 }
 
                 // 2. Traversal: Force Mesh Material & Wireframe Overrides
-                display.scene.traverse(function(child) {
+                //
+                // NOTE: this build of three.js (r50-era) predates
+                // Object3D.prototype.traverse -- it does not exist on scene/
+                // mesh instances here. The equivalent in this version is the
+                // free function THREE.SceneUtils.traverseHierarchy(root, cb).
+                THREE.SceneUtils.traverseHierarchy(scene, function(child) {
                     if (child instanceof THREE.Mesh && child.material) {
-                        // Clone material to prevent global state leaks across track resets
-                        if (!child.material._cloned) {
-                            child.material = child.material.clone();
-                            child.material._cloned = true;
-                        }
+                        var isTrackMesh = (child.material === trackMaterialRef);
+
+                        // NOTE: no material cloning here (this three.js build's
+                        // materials don't all implement .clone(), and it isn't
+                        // needed anyway -- each track's materials are built fresh
+                        // by buildMaterials() on every page load, and "Restart"
+                        // does a full window.location.reload(), so there is no
+                        // shared state across track plays to protect against.
 
                         // Toggle Wireframe Matrix Mode
                         if (theme.wireframe) {
@@ -69,7 +98,7 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
 
                         // Tint Road vs City Structures
                         if (child.material.color) {
-                            if (child.name && child.name.indexOf("track") !== -1) {
+                            if (isTrackMesh) {
                                 child.material.color.setHex(theme.trackColor);
                             } else {
                                 child.material.color.setHex(theme.sceneryColor);
@@ -77,7 +106,7 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
                         }
 
                         if (child.material.ambient) {
-                            child.material.ambient.setHex(theme.trackColor);
+                            child.material.ambient.setHex(isTrackMesh ? theme.trackColor : theme.sceneryColor);
                         }
                     } else if (child instanceof THREE.Light && child.color) {
                         child.color.setHex(theme.trackColor);
