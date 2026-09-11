@@ -1,5 +1,12 @@
 /**
  * CustomTracks.js - Material & Shader Overrides for Visual Variety
+ *
+ * Builds all 50 bkcore.hexgl.tracks.* entries from the data-driven list in
+ * TrackData.js (HEXGL_TRACK_LIST). Every entry reuses the same Cityscape
+ * circuit (geometry, checkpoints, spawn) but overrides fog, track/scenery
+ * colors, wireframe mode and lap count so each track looks and plays
+ * differently, in the spirit of the original hand-written theme overrides
+ * this file used to contain.
  */
 var bkcore = bkcore || {};
 bkcore.hexgl = bkcore.hexgl || {};
@@ -9,58 +16,10 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
     var cityscape = bkcore.hexgl.tracks.Cityscape;
     if (!cityscape) return;
 
-    var trackThemes = {
-        "Cityscape_Prime": {
-            name: "Cityscape Prime",
-            fogColor: 0x88bbff,
-            fogNear: 100, fogFar: 4000,
-            trackColor: 0xffffff,
-            sceneryColor: 0x888888,
-            wireframe: false,
-            laps: 3
-        },
-        "Cyber_Neon": {
-            name: "Cyber Neon Night",
-            fogColor: 0x0a001a,
-            fogNear: 50, fogFar: 2000,
-            trackColor: 0x00ffff,
-            sceneryColor: 0xff00ff,
-            wireframe: false,
-            laps: 3
-        },
-        "Martian_Canyon": {
-            name: "Martian Canyon",
-            fogColor: 0x2b0800,
-            fogNear: 20, fogFar: 1800,
-            trackColor: 0xff4400,
-            sceneryColor: 0x661100,
-            wireframe: false,
-            laps: 4
-        },
-        "Toxic_Sector": {
-            name: "Toxic Sector",
-            fogColor: 0x001a05,
-            fogNear: 10, fogFar: 1200,
-            trackColor: 0x39ff14,
-            sceneryColor: 0x004411,
-            wireframe: false,
-            laps: 4
-        },
-        "Abyssal_Void": {
-            name: "Abyssal Void",
-            fogColor: 0x010105,
-            fogNear: 100, fogFar: 3000,
-            trackColor: 0x3388ff,
-            sceneryColor: 0x002266,
-            wireframe: true, // Grid Matrix Wireframe Mode
-            laps: 5
-        }
-    };
+    var trackList = (typeof HEXGL_TRACK_LIST !== 'undefined') ? HEXGL_TRACK_LIST : [];
 
-    Object.keys(trackThemes).forEach(function(key) {
-        var theme = trackThemes[key];
-
-        bkcore.hexgl.tracks[key] = {
+    trackList.forEach(function(theme) {
+        bkcore.hexgl.tracks[theme.id] = {
             lib: null,
             materials: {},
             name: theme.name,
