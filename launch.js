@@ -36,65 +36,53 @@ if (sTrack) {
     }, false);
 }
 
-// Draws a small top-down outline of the track's actual generated loop onto
-// a canvas, so the select screen shows what shape you're about to drive
-// instead of just a flat color swatch. Uses the exact same generateLayout()
-// the real track uses (same seed = track.num), so the preview always
-// matches the real track.
+// Every track is the same original Cityscape circuit, mirrored/stretched
+// (see buildOriginalVariant in ProceduralTrack.js) -- there's no generated
+// loop shape to draw a preview from anymore. Instead this draws a simple
+// road-perspective icon whose proportions/flip reflect that track's actual
+// transform (same seeded formula the real track uses, via
+// computeVariantTransform), on the track's own swatch color.
 function drawTrackPreview(canvas, track) {
     var ctx = canvas.getContext('2d');
     var w = canvas.width, h = canvas.height;
     ctx.fillStyle = hexColor(track.swatch);
     ctx.fillRect(0, 0, w, h);
 
-    // Track #1 is the real, original hand-built Cityscape circuit, not one
-    // of the generated ones -- generateLayout(track.num) would just draw a
-    // made-up loop shape that has nothing to do with its actual layout, so
-    // label it instead of drawing a fake preview.
-    if (track.id === 'Cityscape_Prime') {
-        ctx.fillStyle = 'rgba(255,255,255,0.92)';
-        ctx.font = 'bold ' + Math.round(h * 0.22) + 'px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('ORIGINAL', w / 2, h / 2);
-        ctx.textAlign = 'start';
-        ctx.textBaseline = 'alphabetic';
-        return;
-    }
-
     var internals = window.bkcore && bkcore.hexgl && bkcore.hexgl.tracks && bkcore.hexgl.tracks._proceduralInternals;
-    if (!internals) return;
-    var layout = internals.generateLayout(track.num);
-    var path = layout.path;
+    var transform = (internals && internals.computeVariantTransform)
+        ? internals.computeVariantTransform(track)
+        : { mirrorX: 1, scaleX: 1, scaleZ: 1 };
 
-    var minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    for (var i = 0; i < path.length; i++) {
-        minX = Math.min(minX, path[i].x); maxX = Math.max(maxX, path[i].x);
-        minZ = Math.min(minZ, path[i].z); maxZ = Math.max(maxZ, path[i].z);
-    }
-    var pad = 8;
-    var spanX = (maxX - minX) || 1, spanZ = (maxZ - minZ) || 1;
-    var scale = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanZ);
-    var offX = (w - spanX * scale) / 2, offZ = (h - spanZ * scale) / 2;
+    var cx = w / 2, cy = h * 0.86;
+    var farW = w * 0.12 * transform.scaleX;
+    var nearW = w * 0.5 * transform.scaleX;
+    var roadLen = h * 0.7 * (0.8 + transform.scaleZ * 0.3);
+    var bend = (transform.mirrorX < 0 ? -1 : 1) * w * 0.1 * Math.abs(transform.scaleX - 1) * 3;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.92)';
-    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
     ctx.beginPath();
-    for (var j = 0; j <= path.length; j++) {
-        var p = path[j % path.length];
-        var px = (p.x - minX) * scale + offX;
-        var py = (p.z - minZ) * scale + offZ;
-        if (j === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
+    ctx.moveTo(cx - nearW / 2, cy);
+    ctx.lineTo(cx + nearW / 2, cy);
+    ctx.lineTo(cx + farW / 2 + bend, cy - roadLen);
+    ctx.lineTo(cx - farW / 2 + bend, cy - roadLen);
     ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 2;
     ctx.stroke();
 
-    // start/finish marker
-    var sp0 = path[layout.checkpoints[0]];
     ctx.fillStyle = '#ff6a3d';
     ctx.beginPath();
-    ctx.arc((sp0.x - minX) * scale + offX, (sp0.z - minZ) * scale + offZ, 3, 0, Math.PI * 2);
+    ctx.arc(cx, cy - 2, 3.5, 0, Math.PI * 2);
     ctx.fill();
+
+    if (track.num === 1) {
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.font = 'bold ' + Math.round(h * 0.15) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('ORIGINAL', cx, h * 0.2);
+        ctx.textAlign = 'start';
+    }
 }
 
 var trackGrid = $('track-grid');
