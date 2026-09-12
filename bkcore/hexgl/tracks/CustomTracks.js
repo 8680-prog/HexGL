@@ -1,20 +1,20 @@
 /**
  * CustomTracks.js - Builds all 50 bkcore.hexgl.tracks.* entries.
  *
- * Track #1 (Cityscape_Prime) is the real, original hand-built Cityscape
- * circuit -- unmodified, same collision/height maps, same hand-modeled
- * skyscrapers -- so there's always one track in the list that's the actual
- * original game, not a generated approximation of it.
+ * Every track uses the SAME real, original hand-built Cityscape assets --
+ * same road/building geometry, same textures, same collision and height
+ * data (see buildOriginalVariant in ProceduralTrack.js) -- not a generated
+ * approximation of them. Only two things vary per track:
+ *   - route: a mirror + independent X/Z stretch, applied identically to
+ *     the 3D meshes and to the collision/height bitmaps, seeded from the
+ *     track's number;
+ *   - theme: skybox tint plus a light ambient tint on the original
+ *     materials, from TrackData.js (HEXGL_TRACK_LIST).
+ * Track #1 (Cityscape_Prime) gets the identity transform, so it's
+ * pixel-for-pixel the original.
  *
- * Every other entry is a genuinely distinct, procedurally generated
- * closed-loop circuit (see ProceduralTrack.js) -- its own path shape,
- * width, elevation profile and checkpoint layout, derived deterministically
- * from the track's number (used as the generator's seed) -- combined with
- * its own visual theme (fog, track/scenery colors, wireframe mode, lap
- * count) from TrackData.js (HEXGL_TRACK_LIST).
- *
- * Ship model, skybox, HUD, audio and controls are reused from Cityscape.js
- * since none of that depends on track layout.
+ * Ship model, skybox base, HUD, audio and controls are reused from
+ * Cityscape.js since none of that depends on the route.
  */
 var bkcore = bkcore || {};
 bkcore.hexgl = bkcore.hexgl || {};
@@ -28,11 +28,6 @@ bkcore.hexgl.tracks = bkcore.hexgl.tracks || {};
 
     trackList.forEach(function(theme) {
         theme.seed = theme.num;
-        if (theme.id === 'Cityscape_Prime') {
-            // The original track itself, not a procedural stand-in for it.
-            bkcore.hexgl.tracks[theme.id] = cityscape;
-        } else {
-            bkcore.hexgl.tracks[theme.id] = bkcore.hexgl.tracks.buildProcedural(theme, cityscape);
-        }
+        bkcore.hexgl.tracks[theme.id] = bkcore.hexgl.tracks.buildOriginalVariant(theme, cityscape);
     });
 })();
